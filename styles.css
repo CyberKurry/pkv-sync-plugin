@@ -1,0 +1,1573 @@
+/*
+ * PKV Sync — Obsidian Plugin stylesheet
+ * Design language: "Working Paper" — terracotta seal accent on Obsidian's
+ * native palette. Mostly inherits from Obsidian CSS variables so the plugin
+ * blends with the user's chosen theme; only adds a distinctive PKV accent.
+ */
+
+/* =====================================================================
+ * 1. Settings tab scope + tokens
+ * =================================================================== */
+
+.pkv-sync-settings-host {
+  --pkv-mark: #b0593b;
+  --pkv-mark-hover: #95442c;
+  --pkv-mark-soft: rgba(176, 89, 59, 0.16);
+  --pkv-mark-faint: rgba(176, 89, 59, 0.08);
+  --pkv-mark-ink: #fbf9f3;
+
+  --pkv-bg-page: var(--background-secondary);
+  --pkv-bg-panel: var(--background-primary);
+  --pkv-bg-control: var(--background-modifier-form-field, var(--background-primary));
+  --pkv-bg-soft: var(--background-modifier-hover);
+  --pkv-border: var(--background-modifier-border);
+  --pkv-border-subtle: var(--background-modifier-border-hover, var(--background-modifier-border));
+
+  --pkv-text: var(--text-normal);
+  --pkv-text-strong: var(--text-normal);
+  --pkv-label: var(--text-normal);
+  --pkv-muted: var(--text-muted);
+  --pkv-faint: var(--text-faint);
+  --pkv-disabled: var(--text-faint);
+  --pkv-placeholder: var(--text-faint);
+
+  --pkv-ok: var(--color-green, #3f6b3f);
+  --pkv-warn: var(--color-orange, #a87a1f);
+  --pkv-err: var(--color-red, #9b3434);
+
+  --pkv-control-h: 36px;
+  --pkv-control-h-sm: 30px;
+
+  --pkv-radius-1: 4px;
+  --pkv-radius-2: 6px;
+  --pkv-radius-3: 10px;
+
+  --pkv-tracking-meta: 0.08em;
+  --pkv-font-meta: var(--font-monospace);
+  --pkv-font-body: var(--font-interface);
+
+  --pkv-mobile-chrome-offset: 96px;
+  --pkv-mobile-top-offset: 0px;
+
+  color-scheme: light dark;
+  min-height: 100%;
+  box-sizing: border-box;
+  padding: 0 !important;
+  background: var(--pkv-bg-page);
+  color: var(--pkv-text);
+}
+
+/* Hard light override (user picked "light" in plugin settings) */
+.pkv-sync-settings-host.is-light-override {
+  --pkv-bg-page: #f7f4ed;
+  --pkv-bg-panel: #fbf9f3;
+  --pkv-bg-control: #efeadf;
+  --pkv-bg-soft: rgba(26, 24, 18, 0.06);
+  --pkv-border: rgba(26, 24, 18, 0.14);
+  --pkv-border-subtle: rgba(26, 24, 18, 0.09);
+  --pkv-text: #1a1812;
+  --pkv-text-strong: #1a1812;
+  --pkv-label: #1a1812;
+  --pkv-muted: #4a4538;
+  --pkv-faint: #7a7568;
+  --pkv-disabled: #b8b1a0;
+  --pkv-placeholder: #b8b1a0;
+  color-scheme: light;
+}
+
+/* Hard dark override */
+.pkv-sync-settings-host.is-dark-override {
+  --pkv-bg-page: #13110d;
+  --pkv-bg-panel: #1a1814;
+  --pkv-bg-control: #22201a;
+  --pkv-bg-soft: rgba(235, 229, 211, 0.07);
+  --pkv-border: rgba(235, 229, 211, 0.16);
+  --pkv-border-subtle: rgba(235, 229, 211, 0.1);
+  --pkv-mark: #d68565;
+  --pkv-mark-hover: #e5997c;
+  --pkv-mark-soft: rgba(214, 133, 101, 0.16);
+  --pkv-mark-faint: rgba(214, 133, 101, 0.08);
+  --pkv-mark-ink: #1a1814;
+  --pkv-text: #ebe5d3;
+  --pkv-text-strong: #ebe5d3;
+  --pkv-label: #ebe5d3;
+  --pkv-muted: #8e8876;
+  --pkv-faint: #4f4a3e;
+  --pkv-disabled: #4f4a3e;
+  --pkv-placeholder: #4f4a3e;
+  color-scheme: dark;
+}
+
+.pkv-sync-settings-host.is-phone {
+  --pkv-mobile-chrome-offset: 112px;
+}
+
+/* =====================================================================
+ * 2. App shell
+ * =================================================================== */
+
+.pkv-sync-app {
+  display: block;
+  width: 100%;
+  min-height: 100%;
+}
+
+.pkv-sync-panel {
+  width: 100%;
+  max-width: none;
+  min-height: 100%;
+  box-sizing: border-box;
+  border-radius: 0;
+  background: var(--pkv-bg-panel);
+  color: var(--pkv-text);
+  padding: 32px 28px 40px;
+  font-family: var(--pkv-font-body);
+  font-size: 14px;
+  line-height: 1.55;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+/* =====================================================================
+ * 3. Header / wordmark
+ * =================================================================== */
+
+.pkv-sync-header {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--pkv-border-subtle);
+  margin-bottom: 4px;
+}
+
+.pkv-sync-logo {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0;
+  font-family: var(--pkv-font-meta);
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--pkv-mark);
+  user-select: none;
+}
+
+.pkv-sync-logo svg {
+  display: none;
+}
+
+.pkv-sync-logo::before {
+  content: "[PKV";
+  color: var(--pkv-mark);
+}
+
+.pkv-sync-logo::after {
+  content: "/SYNC]";
+  color: var(--pkv-mark);
+}
+
+.pkv-sync-title-block {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+.pkv-sync-title {
+  display: none;
+}
+
+.pkv-sync-header-detail {
+  font-family: var(--pkv-font-meta);
+  font-size: 11px;
+  letter-spacing: var(--pkv-tracking-meta);
+  text-transform: uppercase;
+  color: var(--pkv-muted);
+  margin: 0;
+  flex: 1;
+}
+
+.pkv-sync-header-detail.is-muted {
+  color: var(--pkv-faint);
+}
+
+.pkv-sync-header-detail.is-success {
+  color: var(--pkv-ok);
+}
+
+.pkv-sync-time-toggle,
+.pkv-sync-settings-host button.pkv-sync-time-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  background: transparent;
+  border: 1px solid var(--pkv-border-subtle);
+  border-radius: var(--pkv-radius-1);
+  font-family: var(--pkv-font-meta);
+  font-size: 11px;
+  letter-spacing: var(--pkv-tracking-meta);
+  text-transform: uppercase;
+  color: var(--pkv-muted);
+  cursor: pointer;
+  box-shadow: none;
+  transition: border-color 80ms ease, color 80ms ease;
+}
+
+.pkv-sync-time-toggle span:first-child {
+  white-space: nowrap;
+}
+
+.pkv-sync-time-caret {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-right: 1px solid currentColor;
+  border-bottom: 1px solid currentColor;
+  transform: rotate(45deg);
+  transition: transform 140ms ease;
+}
+
+.pkv-sync-time-caret.is-open {
+  transform: rotate(-135deg);
+}
+
+.pkv-sync-time-detail {
+  font-family: var(--pkv-font-meta);
+  font-size: 11px;
+  color: var(--pkv-muted);
+  margin: 4px 0 0;
+}
+
+/* =====================================================================
+ * 4. Layout primitives
+ * =================================================================== */
+
+.pkv-sync-divider {
+  height: 1px;
+  background: var(--pkv-border-subtle);
+  border: 0;
+  margin: 12px 0 4px;
+}
+
+.pkv-sync-inline-field {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.pkv-sync-section-label {
+  display: block;
+  font-family: var(--pkv-font-meta);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: var(--pkv-tracking-meta);
+  text-transform: uppercase;
+  color: var(--pkv-muted);
+  margin: 4px 0 6px;
+}
+
+.pkv-sync-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.pkv-sync-label {
+  display: block;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--pkv-label);
+  margin-bottom: 2px;
+}
+
+/* =====================================================================
+ * 5. Form controls
+ * =================================================================== */
+
+.pkv-sync-input,
+.pkv-sync-settings-host input.pkv-sync-input,
+.pkv-sync-settings-host select.pkv-sync-input {
+  width: 100%;
+  height: var(--pkv-control-h);
+  padding: 0 12px;
+  background: var(--pkv-bg-control);
+  color: var(--pkv-text);
+  border: 1px solid var(--pkv-border);
+  border-radius: var(--pkv-radius-2);
+  font-family: var(--pkv-font-body);
+  font-size: 14px;
+  box-sizing: border-box;
+  transition: border-color 80ms ease;
+}
+
+.pkv-sync-input::placeholder {
+  color: var(--pkv-placeholder);
+}
+
+.pkv-sync-input:focus,
+.pkv-sync-settings-host input.pkv-sync-input:focus,
+.pkv-sync-settings-host select.pkv-sync-input:focus {
+  outline: none;
+  border-color: var(--pkv-mark);
+  box-shadow: 0 0 0 3px var(--pkv-mark-faint);
+}
+
+.pkv-sync-select-wrap {
+  position: relative;
+}
+
+.pkv-sync-select-wrap::after {
+  content: "";
+  position: absolute;
+  right: 12px;
+  top: 50%;
+  width: 6px;
+  height: 6px;
+  border-right: 1px solid var(--pkv-muted);
+  border-bottom: 1px solid var(--pkv-muted);
+  transform: translateY(-75%) rotate(45deg);
+  pointer-events: none;
+}
+
+.pkv-sync-select,
+.pkv-sync-settings-host select.pkv-sync-select {
+  appearance: none;
+  padding-right: 32px;
+}
+
+.pkv-sync-language-select {
+  min-width: 140px;
+}
+
+.pkv-sync-language-select .pkv-sync-select {
+  width: 100%;
+}
+
+.pkv-sync-theme-button,
+.pkv-sync-settings-host button.pkv-sync-theme-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: var(--pkv-control-h);
+  padding: 0 14px;
+  background: var(--pkv-bg-control);
+  color: var(--pkv-text);
+  border: 1px solid var(--pkv-border);
+  border-radius: var(--pkv-radius-2);
+  font-family: var(--pkv-font-body);
+  font-size: 13px;
+  cursor: pointer;
+  box-shadow: none;
+  transition: border-color 80ms ease;
+}
+
+.pkv-sync-theme-button:hover,
+.pkv-sync-settings-host button.pkv-sync-theme-button:hover {
+  border-color: var(--pkv-mark);
+}
+
+.pkv-sync-theme-button[data-theme-mode="light"],
+.pkv-sync-theme-button[data-theme-mode="dark"] {
+  border-color: var(--pkv-border);
+}
+
+.pkv-sync-theme-button.is-dark {
+  /* informational class only */
+}
+
+.pkv-sync-theme-icon,
+.pkv-sync-theme-icon svg {
+  width: 14px;
+  height: 14px;
+  color: var(--pkv-muted);
+}
+
+.pkv-sync-theme-label {
+  font-family: var(--pkv-font-meta);
+  font-size: 11px;
+  letter-spacing: var(--pkv-tracking-meta);
+  text-transform: uppercase;
+  color: var(--pkv-muted);
+}
+
+/* =====================================================================
+ * 6. Buttons
+ * =================================================================== */
+
+.pkv-sync-button-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.pkv-sync-allowlist-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+
+.pkv-sync-button,
+.pkv-sync-settings-host button.pkv-sync-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: var(--pkv-control-h);
+  padding: 0 14px;
+  font-family: var(--pkv-font-body);
+  font-size: 13px;
+  font-weight: 500;
+  border: 1px solid var(--pkv-border);
+  background: var(--pkv-bg-panel);
+  color: var(--pkv-text);
+  border-radius: var(--pkv-radius-2);
+  cursor: pointer;
+  box-shadow: none;
+  transition: background 80ms ease, border-color 80ms ease, color 80ms ease;
+  white-space: nowrap;
+}
+
+.pkv-sync-panel > .pkv-sync-button {
+  align-self: flex-start;
+}
+
+.pkv-sync-panel > .pkv-sync-change-server {
+  align-self: flex-start;
+}
+
+.pkv-sync-panel > .pkv-sync-button + .pkv-sync-section-label,
+.pkv-sync-button-row + .pkv-sync-section-label {
+  margin-top: 16px;
+}
+
+.pkv-sync-button.is-primary {
+  background: var(--pkv-mark);
+  color: var(--pkv-mark-ink);
+  border-color: var(--pkv-mark);
+}
+
+.pkv-sync-button.is-secondary {
+  background: var(--pkv-bg-panel);
+  color: var(--pkv-text);
+  border-color: var(--pkv-border);
+}
+
+.pkv-sync-button.is-ghost {
+  background: transparent;
+  color: var(--pkv-muted);
+  border-color: transparent;
+}
+
+.pkv-sync-button.is-ghost:hover {
+  color: var(--pkv-text);
+  background: var(--pkv-mark-faint);
+}
+
+.pkv-sync-button:hover,
+.pkv-sync-settings-host button.pkv-sync-button:hover {
+  border-color: var(--pkv-mark);
+}
+
+.pkv-sync-button.is-primary:hover {
+  background: var(--pkv-mark-hover);
+  border-color: var(--pkv-mark-hover);
+  color: var(--pkv-mark-ink);
+}
+
+.pkv-sync-button:disabled,
+.pkv-sync-settings-host button.pkv-sync-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.pkv-sync-button-icon,
+.pkv-sync-button-icon svg {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+
+/* =====================================================================
+ * 7. Sync status body
+ * =================================================================== */
+
+.pkv-sync-synced-body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.pkv-sync-loading {
+  font-family: var(--pkv-font-meta);
+  font-size: 12px;
+  letter-spacing: var(--pkv-tracking-meta);
+  text-transform: uppercase;
+  color: var(--pkv-muted);
+}
+
+.pkv-sync-user-card {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 12px;
+  align-items: center;
+  padding: 12px;
+  background: var(--pkv-bg-control);
+  border: 1px solid var(--pkv-border-subtle);
+  border-radius: var(--pkv-radius-3);
+}
+
+.pkv-sync-avatar {
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: var(--pkv-mark);
+  color: var(--pkv-mark-ink);
+  font-family: var(--pkv-font-meta);
+  font-weight: 600;
+  font-size: 13px;
+  flex-shrink: 0;
+}
+
+.pkv-sync-user-meta {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.pkv-sync-user-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--pkv-text-strong);
+  line-height: 1.3;
+}
+
+.pkv-sync-user-server,
+.pkv-sync-vault-summary {
+  font-family: var(--pkv-font-meta);
+  font-size: 11px;
+  color: var(--pkv-muted);
+  letter-spacing: var(--pkv-tracking-meta);
+}
+
+.pkv-sync-user-card + .pkv-sync-section-label,
+.pkv-sync-sync-now + .pkv-sync-section-label {
+  margin-top: 16px;
+}
+
+.pkv-sync-checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.pkv-sync-checkbox-label {
+  font-size: 13px;
+  color: var(--pkv-text);
+}
+
+/* =====================================================================
+ * 8. Vault rows
+ * =================================================================== */
+
+.pkv-sync-vault-row {
+  display: grid;
+  grid-template-columns: 8px 1fr auto;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--pkv-border-subtle);
+  border-radius: var(--pkv-radius-3);
+  background: var(--pkv-bg-panel);
+  transition: border-color 80ms ease, background 80ms ease;
+}
+
+.pkv-sync-vault-row.is-active {
+  border-color: var(--pkv-mark-soft);
+  background: var(--pkv-mark-faint);
+}
+
+.pkv-sync-vault-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--pkv-faint);
+  flex-shrink: 0;
+}
+
+.pkv-sync-vault-row.is-active .pkv-sync-vault-dot {
+  background: var(--pkv-mark);
+}
+
+.pkv-sync-vault-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.pkv-sync-vault-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--pkv-text-strong);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pkv-sync-vault-row .pkv-sync-button {
+  height: var(--pkv-control-h-sm);
+  padding: 0 10px;
+  font-size: 12px;
+}
+
+.pkv-sync-vault-row .pkv-sync-button.is-primary {
+  background: var(--pkv-mark);
+  color: var(--pkv-mark-ink);
+  border-color: var(--pkv-mark);
+}
+
+.pkv-sync-vault-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.pkv-sync-vault-actions .pkv-sync-button {
+  height: var(--pkv-control-h-sm);
+  padding: 0 10px;
+  font-size: 12px;
+}
+
+.pkv-sync-vault-actions .pkv-sync-button.is-ghost {
+  color: var(--pkv-muted);
+}
+
+.pkv-sync-vault-actions .pkv-sync-button.is-primary {
+  /* primary stays terracotta */
+}
+
+.pkv-sync-vault-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  background: var(--pkv-bg-control);
+  border: 1px solid var(--pkv-border-subtle);
+  border-radius: var(--pkv-radius-3);
+}
+
+.pkv-sync-vault-settings .pkv-sync-section-label,
+.pkv-sync-vault-settings .pkv-sync-field {
+  margin: 0;
+}
+
+.pkv-sync-field-hint {
+  font-family: var(--pkv-font-meta);
+  font-size: 11px;
+  color: var(--pkv-muted);
+  margin: 2px 0 0;
+  line-height: 1.5;
+}
+
+.pkv-sync-vault-settings .pkv-sync-allowlist-actions {
+  margin-top: 4px;
+}
+
+.pkv-sync-allowlist-actions .pkv-sync-button {
+  height: var(--pkv-control-h-sm);
+  padding: 0 10px;
+  font-size: 12px;
+}
+
+.pkv-sync-create-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  align-items: stretch;
+}
+
+.pkv-sync-create-row .pkv-sync-input {
+  height: var(--pkv-control-h);
+}
+
+.pkv-sync-create-row .pkv-sync-button {
+  height: var(--pkv-control-h);
+}
+
+/* =====================================================================
+ * 9. Sync now action
+ * =================================================================== */
+
+.pkv-sync-sync-now,
+.pkv-sync-synced-body > .pkv-sync-sync-now {
+  align-self: flex-start;
+}
+
+/* =====================================================================
+ * 10. Conflicts (settings)
+ * =================================================================== */
+
+.pkv-sync-conflict-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--pkv-border-subtle);
+  border-radius: var(--pkv-radius-3);
+  background: var(--pkv-bg-panel);
+}
+
+.pkv-sync-conflict-meta {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+}
+
+.pkv-sync-conflict-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--pkv-text-strong);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pkv-sync-conflict-summary {
+  font-family: var(--pkv-font-meta);
+  font-size: 11px;
+  color: var(--pkv-muted);
+}
+
+.pkv-sync-conflict-row .pkv-sync-button {
+  height: var(--pkv-control-h-sm);
+  padding: 0 10px;
+  font-size: 12px;
+}
+
+/* =====================================================================
+ * 11. Update card
+ * =================================================================== */
+
+.pkv-sync-update-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 14px;
+  border: 1px solid var(--pkv-mark-soft);
+  border-left: 3px solid var(--pkv-mark);
+  border-radius: 0 var(--pkv-radius-3) var(--pkv-radius-3) 0;
+  background: var(--pkv-mark-faint);
+}
+
+.pkv-sync-update-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--pkv-text-strong);
+}
+
+.pkv-sync-update-meta {
+  font-family: var(--pkv-font-meta);
+  font-size: 11px;
+  color: var(--pkv-muted);
+}
+
+.pkv-sync-update-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--pkv-font-meta);
+  font-size: 11px;
+  color: var(--pkv-mark);
+  letter-spacing: var(--pkv-tracking-meta);
+  text-transform: uppercase;
+}
+
+.pkv-sync-vault-settings .pkv-sync-textarea,
+.pkv-sync-textarea {
+  width: 100%;
+  min-height: 80px;
+  padding: 8px 12px;
+  background: var(--pkv-bg-control);
+  border: 1px solid var(--pkv-border);
+  border-radius: var(--pkv-radius-2);
+  color: var(--pkv-text);
+  font-family: var(--pkv-font-meta);
+  font-size: 12px;
+  line-height: 1.5;
+  resize: vertical;
+}
+
+/* =====================================================================
+ * 12. Devices
+ * =================================================================== */
+
+.pkv-sync-device-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.pkv-sync-device-card {
+  display: grid;
+  grid-template-columns: 8px 1fr auto;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--pkv-border-subtle);
+  border-radius: var(--pkv-radius-3);
+  background: var(--pkv-bg-panel);
+}
+
+.pkv-sync-device-status {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--pkv-faint);
+}
+
+.pkv-sync-device-card.is-current .pkv-sync-device-status {
+  background: var(--pkv-mark);
+}
+
+.pkv-sync-device-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--pkv-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pkv-sync-device-badge {
+  font-family: var(--pkv-font-meta);
+  font-size: 10px;
+  letter-spacing: var(--pkv-tracking-meta);
+  text-transform: uppercase;
+  color: var(--pkv-muted);
+}
+
+/* =====================================================================
+ * 13. State helpers
+ * =================================================================== */
+
+.pkv-sync-error {
+  padding: 8px 12px;
+  background: rgba(155, 52, 52, 0.1);
+  border-left: 2px solid var(--pkv-err);
+  color: var(--pkv-err);
+  font-size: 12px;
+  border-radius: 0 var(--pkv-radius-1) var(--pkv-radius-1) 0;
+}
+
+.pkv-sync-error-action {
+  margin-top: 6px;
+}
+
+.pkv-sync-muted {
+  color: var(--pkv-muted);
+  font-size: 12px;
+}
+
+.pkv-sync-success {
+  padding: 8px 12px;
+  background: rgba(63, 107, 63, 0.1);
+  border-left: 2px solid var(--pkv-ok);
+  color: var(--pkv-ok);
+  font-size: 12px;
+  border-radius: 0 var(--pkv-radius-1) var(--pkv-radius-1) 0;
+}
+
+/* =====================================================================
+ * 14. Modals — history / diff / restore / conflict / delete
+ * =================================================================== */
+
+.pkvsync-history-modal,
+.pkvsync-diff-modal,
+.pkvsync-restore-modal {
+  --pkv-mark: #b0593b;
+  --pkv-mark-hover: #95442c;
+  --pkv-mark-soft: rgba(176, 89, 59, 0.16);
+  --pkv-mark-faint: rgba(176, 89, 59, 0.08);
+  --pkv-mark-ink: #fbf9f3;
+  --pkv-font-meta: var(--font-monospace);
+  --pkv-tracking-meta: 0.08em;
+  padding: 4px 2px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  color: var(--text-normal);
+  font-family: var(--font-interface);
+}
+
+body.theme-dark .pkvsync-history-modal,
+body.theme-dark .pkvsync-diff-modal,
+body.theme-dark .pkvsync-restore-modal {
+  --pkv-mark: #d68565;
+  --pkv-mark-hover: #e5997c;
+  --pkv-mark-soft: rgba(214, 133, 101, 0.18);
+  --pkv-mark-faint: rgba(214, 133, 101, 0.08);
+  --pkv-mark-ink: #1a1814;
+}
+
+.modal:has(.pkvsync-history-modal) {
+  max-width: 720px;
+}
+
+.modal:has(.pkvsync-diff-modal),
+.modal:has(.pkvsync-conflict-resolve-modal) {
+  width: min(98vw, 1680px);
+  max-width: min(98vw, 1680px);
+}
+
+.pkvsync-diff-modal,
+.pkvsync-conflict-resolve-modal {
+  width: 100%;
+}
+
+.pkvsync-history-header {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.pkvsync-history-heading {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-normal);
+  margin: 0;
+}
+
+.pkvsync-history-path {
+  font-family: var(--pkv-font-meta);
+  font-size: 11px;
+  letter-spacing: var(--pkv-tracking-meta);
+  color: var(--text-muted);
+  word-break: break-all;
+  margin: 0;
+}
+
+.pkvsync-history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.pkvsync-history-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  background: var(--background-secondary);
+  transition: border-color 80ms ease, background 80ms ease;
+}
+
+.pkvsync-history-row:hover {
+  border-color: var(--pkv-mark-soft);
+  background: var(--pkv-mark-faint);
+}
+
+.pkvsync-history-row.is-deleted .pkvsync-history-title {
+  text-decoration: line-through;
+  color: var(--text-muted);
+}
+
+.pkvsync-history-main {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.pkvsync-history-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.pkvsync-history-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-normal);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pkvsync-history-change {
+  display: inline-flex;
+  font-family: var(--pkv-font-meta);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: var(--pkv-tracking-meta);
+  text-transform: uppercase;
+  padding: 2px 6px;
+  border-radius: 3px;
+  background: var(--background-modifier-border);
+  color: var(--text-muted);
+}
+
+.pkvsync-history-change.is-added {
+  background: rgba(63, 107, 63, 0.15);
+  color: var(--color-green, #3f6b3f);
+}
+
+.pkvsync-history-change.is-deleted {
+  background: rgba(155, 52, 52, 0.15);
+  color: var(--color-red, #9b3434);
+}
+
+.pkvsync-history-details {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-family: var(--pkv-font-meta);
+  font-size: 10px;
+  letter-spacing: var(--pkv-tracking-meta);
+  color: var(--text-muted);
+}
+
+.pkvsync-history-device,
+.pkvsync-history-time,
+.pkvsync-history-commit {
+  white-space: nowrap;
+}
+
+.pkvsync-history-commit {
+  text-transform: uppercase;
+}
+
+.pkvsync-history-actions,
+.pkvsync-diff-actions,
+.pkvsync-restore-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.pkvsync-history-actions {
+  flex-direction: row;
+}
+
+.pkvsync-diff-range {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.pkvsync-diff-range-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.pkvsync-diff-range-field select {
+  width: 100%;
+}
+
+.pkvsync-history-empty,
+.pkvsync-history-error,
+.pkvsync-diff-error,
+.pkvsync-diff-binary,
+.pkvsync-diff-warning,
+.pkvsync-restore-warning {
+  padding: 12px 14px;
+  border-radius: 8px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.pkvsync-diff-warning,
+.pkvsync-restore-warning {
+  background: rgba(168, 122, 31, 0.1);
+  border-left: 2px solid var(--color-orange, #a87a1f);
+  color: var(--color-orange, #a87a1f);
+}
+
+.pkvsync-diff {
+  font-family: var(--pkv-font-meta);
+  font-size: 12px;
+  line-height: 1.55;
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  padding: 12px;
+  overflow: auto;
+  max-height: 60vh;
+}
+
+.pkvsync-diff span {
+  display: block;
+}
+
+.pkvsync-diff-split {
+  width: 100%;
+  min-width: 100%;
+  font-family: var(--pkv-font-meta);
+  font-size: 12px;
+  line-height: 1.5;
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  overflow: auto;
+  max-height: 68vh;
+}
+
+.pkvsync-diff-split-header,
+.pkvsync-diff-split-row {
+  display: grid;
+  grid-template-columns: 64px minmax(560px, 1fr) 64px minmax(560px, 1fr);
+  min-width: 1248px;
+}
+
+.pkvsync-diff-split-header {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--background-modifier-hover);
+  font-family: var(--pkv-font-meta);
+  font-size: 10px;
+  letter-spacing: var(--pkv-tracking-meta);
+  text-transform: uppercase;
+  color: var(--text-muted);
+  padding: 6px 0;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.pkvsync-diff-header-cell,
+.pkvsync-diff-line-no,
+.pkvsync-diff-cell {
+  padding: 2px 8px;
+}
+
+.pkvsync-diff-line-no {
+  text-align: right;
+  color: var(--text-faint);
+  user-select: none;
+  border-right: 1px solid var(--background-modifier-border);
+  background: color-mix(in srgb, var(--background-secondary) 92%, var(--background-modifier-hover));
+}
+
+.pkvsync-diff-cell {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  tab-size: 2;
+}
+
+.pkvsync-diff-split-row.is-full {
+  grid-template-columns: 64px minmax(1184px, 1fr);
+}
+
+.pkvsync-diff-split-row.is-hunk {
+  background: var(--background-modifier-hover);
+  font-style: italic;
+}
+
+.pkvsync-diff-split-row.is-meta {
+  color: var(--text-muted);
+}
+
+.pkvsync-diff-add {
+  background: rgba(63, 107, 63, 0.12);
+  color: var(--color-green, #3f6b3f);
+}
+
+.pkvsync-diff-del {
+  background: rgba(155, 52, 52, 0.12);
+  color: var(--color-red, #9b3434);
+}
+
+.pkvsync-diff-hunk {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.pkvsync-diff-meta,
+.pkvsync-diff-context {
+  color: var(--text-muted);
+}
+
+.pkvsync-diff-empty {
+  text-align: center;
+  padding: 24px;
+  color: var(--text-muted);
+}
+
+.pkvsync-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 14px;
+  border-radius: 6px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-primary);
+  color: var(--text-normal);
+  font-family: var(--font-interface);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  box-shadow: none;
+  transition: border-color 80ms ease, background 80ms ease, color 80ms ease;
+}
+
+.pkvsync-button.is-danger {
+  color: var(--color-red, #9b3434);
+  border-color: rgba(155, 52, 52, 0.3);
+}
+
+.pkvsync-button.is-danger:hover {
+  background: rgba(155, 52, 52, 0.1);
+}
+
+.pkvsync-button.is-secondary {
+  /* default look */
+}
+
+.pkvsync-button.is-ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-muted);
+}
+
+.pkvsync-button.is-ghost:hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+
+.pkvsync-button:hover {
+  border-color: var(--pkv-mark);
+}
+
+.pkvsync-input {
+  width: 100%;
+  height: 32px;
+  padding: 0 10px;
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  font-family: var(--font-interface);
+  font-size: 13px;
+  color: var(--text-normal);
+  box-sizing: border-box;
+}
+
+.pkvsync-input:focus {
+  outline: none;
+  border-color: var(--pkv-mark);
+  box-shadow: 0 0 0 3px var(--pkv-mark-faint);
+}
+
+.pkvsync-delete-vault-modal {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 4px 2px 8px;
+}
+
+.pkvsync-delete-vault-modal h2 {
+  font-size: 15px;
+  font-weight: 600;
+  margin: 0;
+  color: var(--text-normal);
+}
+
+.pkvsync-delete-vault-body {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-normal);
+}
+
+.pkvsync-delete-vault-prompt {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.pkvsync-delete-vault-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.pkvsync-conflicts-list-modal,
+.pkvsync-conflict-resolve-modal {
+  --pkv-mark: #b0593b;
+  --pkv-mark-soft: rgba(176, 89, 59, 0.16);
+  --pkv-mark-faint: rgba(176, 89, 59, 0.08);
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 4px 2px 8px;
+  color: var(--text-normal);
+  font-family: var(--font-interface);
+}
+
+.pkvsync-conflicts-list-modal h2,
+.pkvsync-conflict-resolve-modal h2 {
+  font-size: 15px;
+  font-weight: 600;
+  margin: 0;
+}
+
+.pkvsync-conflicts-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.pkvsync-conflicts-empty {
+  text-align: center;
+  padding: 24px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.pkvsync-conflict-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  cursor: pointer;
+  background: var(--background-secondary);
+  transition: border-color 80ms ease, background 80ms ease;
+}
+
+.pkvsync-conflict-row:hover {
+  border-color: var(--pkv-mark-soft);
+  background: var(--pkv-mark-faint);
+}
+
+.pkvsync-conflict-path {
+  flex: 1;
+  font-family: var(--font-monospace);
+  font-size: 12px;
+  color: var(--text-normal);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pkvsync-conflict-resolve-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.pkvsync-conflict-diff {
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.pkvsync-conflict-kind {
+  font-family: var(--font-monospace);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  background: var(--background-modifier-hover);
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.pkvsync-merge-marker-preview {
+  font-family: var(--font-monospace);
+  font-size: 11px;
+  line-height: 1.55;
+  background: var(--background-secondary);
+  padding: 6px 0;
+  max-height: 50vh;
+  overflow: auto;
+}
+
+.pkvsync-merge-marker-row {
+  display: grid;
+  grid-template-columns: 48px 1fr;
+}
+
+.pkvsync-merge-marker-line-no {
+  text-align: right;
+  padding: 0 8px;
+  color: var(--text-faint);
+  user-select: none;
+  border-right: 1px solid var(--background-modifier-border);
+}
+
+.pkvsync-merge-marker-text {
+  padding: 0 10px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.pkvsync-merge-marker-local,
+.pkvsync-merge-marker-remote,
+.pkvsync-merge-marker-separator {
+  font-weight: 600;
+}
+
+.pkvsync-merge-marker-local {
+  color: var(--color-green, #3f6b3f);
+}
+
+.pkvsync-merge-marker-remote {
+  color: var(--color-red, #9b3434);
+}
+
+.pkvsync-merge-marker-separator {
+  color: var(--text-muted);
+}
+
+.pkvsync-conflict-binary {
+  padding: 12px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--text-muted);
+  background: var(--background-secondary);
+  border: 1px dashed var(--background-modifier-border);
+  border-radius: 8px;
+}
+
+.pkvsync-conflict-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+  flex-wrap: wrap;
+}
+
+/* =====================================================================
+ * 15. Responsive
+ * =================================================================== */
+
+@media (max-width: 520px) {
+  .pkv-sync-settings-host {
+    padding: 0 !important;
+  }
+
+  .pkv-sync-panel {
+    padding: 24px 18px 32px;
+    gap: 16px;
+  }
+
+  .pkv-sync-button-row {
+    grid-template-columns: 1fr;
+  }
+
+  .pkv-sync-inline-field {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .pkv-sync-language-select {
+    width: 100%;
+    min-width: 0;
+    flex-basis: auto;
+  }
+
+  .pkv-sync-theme-button,
+  .pkv-sync-settings-host button.pkv-sync-theme-button {
+    width: 100%;
+  }
+
+  .pkv-sync-user-card {
+    align-items: flex-start;
+  }
+
+  .pkv-sync-create-row {
+    grid-template-columns: 1fr;
+  }
+
+  .pkv-sync-vault-row {
+    grid-template-columns: 8px minmax(0, 1fr);
+  }
+
+  .pkv-sync-vault-actions {
+    grid-column: 2 / -1;
+    justify-content: stretch;
+  }
+
+  .pkv-sync-vault-actions .pkv-sync-button {
+    flex: 1 1 auto;
+  }
+
+  .pkv-sync-conflict-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .pkv-sync-conflict-row .pkv-sync-button {
+    width: 100%;
+  }
+
+  .pkvsync-history-row {
+    grid-template-columns: 1fr;
+  }
+
+  .pkvsync-history-title-row {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .pkvsync-history-actions,
+  .pkvsync-diff-actions,
+  .pkvsync-restore-actions {
+    justify-content: stretch;
+  }
+
+  .pkvsync-history-actions .pkvsync-button,
+  .pkvsync-diff-actions .pkvsync-button,
+  .pkvsync-restore-actions .pkvsync-button {
+    flex: 1 1 100%;
+  }
+
+  .pkvsync-diff-range {
+    grid-template-columns: 1fr;
+  }
+
+  .pkvsync-delete-vault-actions,
+  .pkvsync-conflict-actions {
+    flex-direction: column-reverse;
+  }
+
+  .pkvsync-delete-vault-actions .pkvsync-button,
+  .pkvsync-conflict-actions .pkvsync-button {
+    width: 100%;
+  }
+
+  .modal:has(.pkvsync-conflict-resolve-modal) {
+    width: 96vw;
+  }
+}
+
+body.is-mobile .pkv-sync-panel,
+.pkv-sync-settings-host.is-mobile .pkv-sync-panel {
+  padding-top: calc(var(--pkv-mobile-chrome-offset) + env(safe-area-inset-top) + var(--pkv-mobile-top-offset));
+}
