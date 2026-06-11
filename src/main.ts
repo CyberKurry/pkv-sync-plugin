@@ -113,7 +113,7 @@ export default class PKVSyncPlugin extends Plugin {
     this.addSettingTab(new PKVSyncSettingTab(this.app, this));
     this.registerVaultWatchers();
     this.addCommand({
-      id: "pkv-sync-show-status",
+      id: "show-status",
       name: t.showStatusCommand,
       callback: () =>
         new Notice(
@@ -123,7 +123,7 @@ export default class PKVSyncPlugin extends Plugin {
         )
     });
     this.addCommand({
-      id: "pkv-sync-refresh-account",
+      id: "refresh-account",
       name: t.refreshAccountCommand,
       callback: async () => {
         try {
@@ -139,22 +139,22 @@ export default class PKVSyncPlugin extends Plugin {
       }
     });
     this.addCommand({
-      id: "pkv-sync-manual-sync",
+      id: "manual-sync",
       name: t.manualSyncCommand,
       callback: () => void this.syncNowManual()
     });
     this.addCommand({
-      id: "pkv-sync-check-for-updates",
+      id: "check-for-updates",
       name: t.checkForPluginUpdatesCommand,
       callback: () => void this.checkForPluginUpdates(true)
     });
     this.addCommand({
-      id: "pkv-sync-migrate-from-obsidian-sync",
+      id: "migrate-from-obsidian-sync",
       name: t.migrateCommand,
       callback: () => void this.openMigrationModal()
     });
     this.addCommand({
-      id: "pkv-sync-view-status",
+      id: "view-status",
       name: t.viewSyncStatusCommand,
       callback: () => {
         const current = this.text();
@@ -175,7 +175,7 @@ export default class PKVSyncPlugin extends Plugin {
       }
     });
     this.addCommand({
-      id: "pkv-sync-list-conflicts",
+      id: "list-conflicts",
       name: t.listConflictsCommand,
       callback: () => {
         const current = this.text();
@@ -190,17 +190,17 @@ export default class PKVSyncPlugin extends Plugin {
       }
     });
     this.addCommand({
-      id: "pkv-sync-delete-conflicts",
+      id: "delete-conflicts",
       name: t.deleteConflictsCommand,
       callback: () => void this.deleteConflictFiles()
     });
     this.addCommand({
-      id: "pkv-sync-resolve-conflicts",
+      id: "resolve-conflicts",
       name: t.resolveConflictsCommand,
       callback: () => this.openConflictsList()
     });
     this.addCommand({
-      id: "pkv-sync-show-file-history",
+      id: "show-file-history",
       name: t.showFileHistoryCommand,
       checkCallback: (checking) => {
         if (!this.historyEnabled()) return false;
@@ -209,7 +209,7 @@ export default class PKVSyncPlugin extends Plugin {
       }
     });
     this.addCommand({
-      id: "pkv-sync-show-vault-history",
+      id: "show-vault-history",
       name: t.showVaultHistoryCommand,
       checkCallback: (checking) => {
         if (!this.historyEnabled()) return false;
@@ -222,7 +222,7 @@ export default class PKVSyncPlugin extends Plugin {
     this.scheduleUpdateChecks();
   }
 
-  async onunload(): Promise<void> {
+  onunload(): void {
     const engine = this.engine;
     this.pushDebouncer?.cancel();
     if (this.pollTimer !== null) window.clearInterval(this.pollTimer);
@@ -232,16 +232,18 @@ export default class PKVSyncPlugin extends Plugin {
       window.clearInterval(this.updateIntervalTimer);
     }
     engine?.stopEventSubscription();
-    if (engine) {
-      try {
-        await engine.flushOnUnload(3000);
-      } catch (error) {
-        debugLog("[pkv-sync] final unload sync failed:", error);
+    void (async () => {
+      if (engine) {
+        try {
+          await engine.flushOnUnload(3000);
+        } catch (error) {
+          debugLog("[pkv-sync] final unload sync failed:", error);
+        }
       }
-    }
-    this.syncGeneration++;
-    this.engine = null;
-    this.statusEl = null;
+      this.syncGeneration++;
+      this.engine = null;
+      this.statusEl = null;
+    })();
   }
 
   api(): ApiClient {
@@ -382,11 +384,10 @@ export default class PKVSyncPlugin extends Plugin {
     if (hostname) return hostname;
     const vaultName = this.app.vault.getName?.().trim();
     const prefix = vaultName || "Obsidian";
-    const ua = navigator.userAgent.toLowerCase();
-    if (Platform.isAndroidApp || ua.includes("android")) {
+    if (Platform.isAndroidApp) {
       return `${prefix} - ${t.defaultAndroidDevice}`;
     }
-    if (Platform.isIosApp || ua.includes("iphone") || ua.includes("ipad")) {
+    if (Platform.isIosApp) {
       return `${prefix} - ${t.defaultIosDevice}`;
     }
     return `${prefix} - ${t.defaultDesktopDevice}`;
