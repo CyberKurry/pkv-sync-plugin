@@ -1,0 +1,22 @@
+{
+  "name": "pkv-sync-obsidian-plugin",
+  "version": "1.2.2",
+  "private": true,
+  "scripts": {
+    "build": "node esbuild.config.mjs production",
+    "dev": "node esbuild.config.mjs development --watch",
+    "package": "npm run build && node release.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.30",
+    "@vitest/coverage-v8": "^4.1.5",
+    "builtin-modules": "^3.3.0",
+    "esbuild": "^0.28.0",
+    "obsidian": "^1.5.12",
+    "tslib": "^2.6.2",
+    "typescript": "^5.4.2",
+    "vitest": "^4.1.5"
+  }
+}
