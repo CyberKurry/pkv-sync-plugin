@@ -31,11 +31,12 @@ import {
   deleteConflictFiles,
   findConflictPairsForPath,
   findConflictPairsForPathWithKinds,
-  type ConflictPair,
-  listConflictFiles
+  type ConflictPair
 } from "./sync/conflict-files";
+import { registerCommands } from "./commands";
+import { SyncOrchestrator } from "./sync-orchestrator";
 import type { LocalIndex } from "./sync/types";
-import { ObsidianVaultAdapter, shouldSyncPath } from "./sync/vault-adapter";
+import { ObsidianVaultAdapter } from "./sync/vault-adapter";
 import { restoreFileToCommit } from "./sync/restore";
 import { format, strings, type Strings } from "./i18n";
 import { DiffModal } from "./ui/diff-modal";
@@ -48,7 +49,7 @@ import { addConflictResolveMenuItem } from "./ui/conflict-menu";
 import { ConflictsListModal } from "./ui/conflicts-list-modal";
 import { ConflictResolveModal } from "./ui/conflict-resolve-modal";
 import { MigrateModal } from "./ui/migrate-modal";
-import { statusText } from "./ui/status";
+import { SyncStatusBar } from "./ui/status-bar";
 import { formatRelativeUnixSeconds, formatUnixSeconds } from "./time";
 import { SerializedPluginDataStore } from "./plugin-store";
 import {
@@ -57,12 +58,12 @@ import {
   type PluginFileAdapter,
   type PluginUpdateStatus
 } from "./services/update-check";
-import { debugLog, errorToMessage, extensionOf } from "./util";
+import { errorToMessage, extensionOf } from "./util";
 
 export default class PKVSyncPlugin extends Plugin {
   settings: PKVSyncSettings = DEFAULT_SETTINGS;
   availableUpdate: PluginUpdateStatus | null = null;
-  private statusEl: HTMLElement | null = null;
+  statusEl: SyncStatusBar | null = null;
   private client: ApiClient | null = null;
   private historyClient: HistoryApi | null = null;
   private updateServiceCache: {
@@ -73,18 +74,26 @@ export default class PKVSyncPlugin extends Plugin {
     pluginId: string;
     pluginDir?: string;
   } | null = null;
-  private engine: SyncEngine | null = null;
-  private pushDebouncer: Debouncer | null = null;
-  private pollTimer: number | null = null;
-  private fallbackTimer: number | null = null;
-  private updateDelayTimer: number | null = null;
-  private updateIntervalTimer: number | null = null;
+  engine: SyncEngine | null = null;
+  pushDebouncer: Debouncer | null = null;
+  pollTimer: number | null = null;
+  fallbackTimer: number | null = null;
+  updateDelayTimer: number | null = null;
+  updateIntervalTimer: number | null = null;
   private serverCapabilities: ServerCapabilities | null = null;
-  private syncGeneration = 0;
+  syncGeneration = 0;
   private dataStore = new SerializedPluginDataStore(
     () => this.loadData(),
     (data) => this.saveData(data)
   );
+  private orchestratorInstance: SyncOrchestrator | null = null;
+
+  private get orchestrator(): SyncOrchestrator {
+    if (!this.orchestratorInstance) {
+      this.orchestratorInstance = new SyncOrchestrator(this);
+    }
+    return this.orchestratorInstance;
+  }
 
   async onload(): Promise<void> {
     const t = this.text();
@@ -108,142 +117,22 @@ export default class PKVSyncPlugin extends Plugin {
       await this.saveSettings({ rebuild: false });
     }
     void this.refreshServerCapabilities();
-    this.statusEl = this.addStatusBarItem();
+    this.statusEl = new SyncStatusBar(
+      this.addStatusBarItem(),
+      () => this.settings,
+      () => this.text()
+    );
     this.updateStatus();
     this.addSettingTab(new PKVSyncSettingTab(this.app, this));
     this.registerVaultWatchers();
-    this.addCommand({
-      id: "show-status",
-      name: t.showStatusCommand,
-      callback: () =>
-        new Notice(
-          isLoggedIn(this.settings)
-            ? t.noticeConnected
-            : t.noticeNotConfigured
-        )
-    });
-    this.addCommand({
-      id: "refresh-account",
-      name: t.refreshAccountCommand,
-      callback: async () => {
-        try {
-          const me = await this.api().me();
-          this.settings.username = me.username;
-          this.settings.userId = me.user_id;
-          await this.saveSettings();
-          new Notice(format(t.refreshedVaults, { count: me.vaults.length }));
-        } catch (error) {
-          new Notice(errorToMessage(error));
-          this.statusEl?.setText(statusText("error", t.refreshFailed, t));
-        }
-      }
-    });
-    this.addCommand({
-      id: "manual-sync",
-      name: t.manualSyncCommand,
-      callback: () => void this.syncNowManual()
-    });
-    this.addCommand({
-      id: "check-for-updates",
-      name: t.checkForPluginUpdatesCommand,
-      callback: () => void this.checkForPluginUpdates(true)
-    });
-    this.addCommand({
-      id: "migrate-from-obsidian-sync",
-      name: t.migrateCommand,
-      callback: () => void this.openMigrationModal()
-    });
-    this.addCommand({
-      id: "view-status",
-      name: t.viewSyncStatusCommand,
-      callback: () => {
-        const current = this.text();
-        new SyncStatusModal(
-          this.app,
-          current.syncStatusTitle,
-          format(current.syncStatusDetails, {
-            server: this.settings.serverUrl,
-            vault: this.settings.selectedVaultName || current.noneValue,
-            user: this.settings.username || current.notLoggedInValue,
-            lastSync:
-              formatUnixSeconds(
-                this.settings.lastSyncSuccessAt,
-                this.settings.timezone
-              ) || current.neverSynced
-          })
-        ).open();
-      }
-    });
-    this.addCommand({
-      id: "list-conflicts",
-      name: t.listConflictsCommand,
-      callback: () => {
-        const current = this.text();
-        const conflicts = listConflictFiles(this.app.vault);
-        new SyncStatusModal(
-          this.app,
-          current.syncStatusTitle,
-          conflicts.length
-            ? conflicts.map((file) => file.path).join("\n")
-            : current.noConflictFiles
-        ).open();
-      }
-    });
-    this.addCommand({
-      id: "delete-conflicts",
-      name: t.deleteConflictsCommand,
-      callback: () => void this.deleteConflictFiles()
-    });
-    this.addCommand({
-      id: "resolve-conflicts",
-      name: t.resolveConflictsCommand,
-      callback: () => this.openConflictsList()
-    });
-    this.addCommand({
-      id: "show-file-history",
-      name: t.showFileHistoryCommand,
-      checkCallback: (checking) => {
-        if (!this.historyEnabled()) return false;
-        if (!checking) void this.openHistoryForActive();
-        return true;
-      }
-    });
-    this.addCommand({
-      id: "show-vault-history",
-      name: t.showVaultHistoryCommand,
-      checkCallback: (checking) => {
-        if (!this.historyEnabled()) return false;
-        if (!checking) void this.openVaultHistory();
-        return true;
-      }
-    });
+    registerCommands(this, t);
     this.registerHistoryFileMenu();
     this.rebuildSyncEngine();
     this.scheduleUpdateChecks();
   }
 
   onunload(): void {
-    const engine = this.engine;
-    this.pushDebouncer?.cancel();
-    if (this.pollTimer !== null) window.clearInterval(this.pollTimer);
-    if (this.fallbackTimer !== null) window.clearInterval(this.fallbackTimer);
-    if (this.updateDelayTimer != null) window.clearTimeout(this.updateDelayTimer);
-    if (this.updateIntervalTimer != null) {
-      window.clearInterval(this.updateIntervalTimer);
-    }
-    engine?.stopEventSubscription();
-    void (async () => {
-      if (engine) {
-        try {
-          await engine.flushOnUnload(3000);
-        } catch (error) {
-          debugLog("[pkv-sync] final unload sync failed:", error);
-        }
-      }
-      this.syncGeneration++;
-      this.engine = null;
-      this.statusEl = null;
-    })();
+    this.orchestrator.dispose();
   }
 
   api(): ApiClient {
@@ -276,25 +165,7 @@ export default class PKVSyncPlugin extends Plugin {
   }
 
   scheduleUpdateChecks(): void {
-    if (this.updateDelayTimer !== null) {
-      window.clearTimeout(this.updateDelayTimer);
-      this.updateDelayTimer = null;
-    }
-    if (this.updateIntervalTimer !== null) {
-      window.clearInterval(this.updateIntervalTimer);
-      this.updateIntervalTimer = null;
-    }
-    if (!this.settings.checkForUpdates) {
-      this.availableUpdate = null;
-      return;
-    }
-    this.updateDelayTimer = window.setTimeout(() => {
-      this.updateDelayTimer = null;
-      void this.checkForPluginUpdates(false);
-      this.updateIntervalTimer = window.setInterval(() => {
-        void this.checkForPluginUpdates(false);
-      }, 24 * 60 * 60 * 1000);
-    }, 5000);
+    this.orchestrator.scheduleUpdateChecks();
   }
 
   async checkForPluginUpdates(showNotice = false): Promise<PluginUpdateStatus | null> {
@@ -370,12 +241,7 @@ export default class PKVSyncPlugin extends Plugin {
   }
 
   updateStatus(): void {
-    const t = this.text();
-    this.statusEl?.setText(
-      isLoggedIn(this.settings)
-        ? statusText("connected", "", t)
-        : statusText("not_configured", "", t)
-    );
+    this.statusEl?.update();
   }
 
   private defaultDeviceName(): string {
@@ -406,7 +272,7 @@ export default class PKVSyncPlugin extends Plugin {
     }
   }
 
-  private async recordSyncSuccess(generation: number): Promise<void> {
+  async recordSyncSuccess(generation: number): Promise<void> {
     if (generation !== this.syncGeneration) return;
     await this.saveSettingsPatch(
       { lastSyncSuccessAt: Math.floor(Date.now() / 1000) },
@@ -499,83 +365,11 @@ export default class PKVSyncPlugin extends Plugin {
   }
 
   private rebuildSyncEngine(): void {
-    const generation = ++this.syncGeneration;
-    this.pushDebouncer?.cancel();
-    if (this.pollTimer !== null) {
-      window.clearInterval(this.pollTimer);
-      this.pollTimer = null;
-    }
-    if (this.fallbackTimer !== null) {
-      window.clearInterval(this.fallbackTimer);
-      this.fallbackTimer = null;
-    }
-    this.engine = null;
-
-    if (!isLoggedIn(this.settings) || !this.settings.selectedVaultId) return;
-
-    const scopeKey = syncScopeKey(this.settings);
-    const textExtensions = new Set(this.settings.textExtensions);
-    this.engine = new SyncEngine({
-      vaultId: this.settings.selectedVaultId,
-      deviceName: this.settings.deviceName,
-      textExtensions,
-      extraExcludeGlobs: this.settings.extraExcludeGlobs,
-      vault: new ObsidianVaultAdapter(this.app.vault),
-      api: new SyncApi(this.api()),
-      index: {
-        loadIndex: () => this.loadSyncIndex(scopeKey),
-        saveIndex: async (index) => {
-          if (generation !== this.syncGeneration) return;
-          await this.saveSyncIndex(index, scopeKey);
-        },
-        updateIndex: async (updater) => {
-          if (generation !== this.syncGeneration) return;
-          await this.updateSyncIndex(updater, scopeKey);
-        }
-      },
-      setStatus: (status, detail) =>
-        generation === this.syncGeneration
-          ? this.statusEl?.setText(statusText(status, detail, this.text()))
-          : undefined,
-      onSyncSuccess: () => this.recordSyncSuccess(generation),
-      deviceId: this.settings.deviceId,
-      serverUrl: this.settings.serverUrl,
-      deploymentKey: this.settings.deploymentKey,
-      token: this.settings.token,
-      pluginVersion: this.manifest.version,
-    });
-    this.engine.startEventSubscription();
-    this.pushDebouncer = new Debouncer(this.settings.debounceMs, () => {
-      void this.engine?.syncNow();
-    });
-    this.pollTimer = window.setInterval(() => {
-      void this.engine?.syncNow();
-    }, this.settings.pollIntervalSeconds * 1000);
-    const fallbackMs = Math.max(
-      30_000,
-      Math.floor((this.settings.pollIntervalSeconds * 1000) / 2)
-    );
-    this.fallbackTimer = window.setInterval(() => {
-      this.pushDebouncer?.trigger();
-    }, fallbackMs);
-    void this.engine.syncNow();
+    this.orchestrator.rebuild();
   }
 
   private registerVaultWatchers(): void {
-    const scheduleForFile = (file: unknown) => {
-      const path =
-        typeof file === "object" && file !== null && "path" in file
-          ? String((file as { path: unknown }).path)
-          : "";
-      if (path && shouldSyncPath(path)) this.pushDebouncer?.trigger();
-    };
-
-    this.registerEvent(this.app.vault.on("modify", scheduleForFile));
-    this.registerEvent(this.app.vault.on("create", scheduleForFile));
-    this.registerEvent(this.app.vault.on("delete", scheduleForFile));
-    this.registerDomEvent(window, "blur", () => {
-      this.pushDebouncer?.trigger();
-    });
+    this.orchestrator.registerVaultWatchers();
   }
 
   private registerHistoryFileMenu(): void {
@@ -607,7 +401,7 @@ export default class PKVSyncPlugin extends Plugin {
     );
   }
 
-  private openConflictsList(
+  openConflictsList(
     pairsProvider?: () => ConflictPair[] | Promise<ConflictPair[]>
   ): void {
     const openList = (): void => {
@@ -648,7 +442,7 @@ export default class PKVSyncPlugin extends Plugin {
     this.openConflictsList(pairsProvider);
   }
 
-  private historyEnabled(): boolean {
+  historyEnabled(): boolean {
     return historyUiAvailable(this.settings, this.serverCapabilities);
   }
 
@@ -656,7 +450,7 @@ export default class PKVSyncPlugin extends Plugin {
     return this.historyEnabled() && (this.serverCapabilities?.diff ?? true);
   }
 
-  private async openHistoryForActive(): Promise<void> {
+  async openHistoryForActive(): Promise<void> {
     const file = this.app.workspace.getActiveFile();
     if (!(file instanceof TFile)) {
       new Notice(this.text().historyDisabled);
@@ -712,7 +506,7 @@ export default class PKVSyncPlugin extends Plugin {
     }).open();
   }
 
-  private async openVaultHistory(): Promise<void> {
+  async openVaultHistory(): Promise<void> {
     const t = this.text();
     if (!this.historyEnabled()) {
       new Notice(t.historyDisabled);
@@ -939,20 +733,10 @@ export default class PKVSyncPlugin extends Plugin {
   }
 
   async syncNowManual(): Promise<void> {
-    const t = this.text();
-    if (!this.engine) {
-      new Notice(t.noticeSyncNotReady);
-      return;
-    }
-    try {
-      await this.engine.syncNow();
-      new Notice(t.noticeSyncComplete);
-    } catch (error) {
-      new Notice(errorToMessage(error));
-    }
+    await this.orchestrator.syncNow();
   }
 
-  private async openMigrationModal(): Promise<void> {
+  async openMigrationModal(): Promise<void> {
     const t = this.text();
     if (!isLoggedIn(this.settings)) {
       new Notice(t.noticeNotConfigured);
@@ -1007,18 +791,7 @@ export default class PKVSyncPlugin extends Plugin {
   }
 
   invalidateSyncEngine(): void {
-    this.engine?.stopEventSubscription();
-    this.pushDebouncer?.cancel();
-    if (this.pollTimer !== null) {
-      window.clearInterval(this.pollTimer);
-      this.pollTimer = null;
-    }
-    if (this.fallbackTimer !== null) {
-      window.clearInterval(this.fallbackTimer);
-      this.fallbackTimer = null;
-    }
-    this.syncGeneration++;
-    this.engine = null;
+    this.orchestrator.invalidate();
   }
 
   async deleteConflictFiles(): Promise<number> {
