@@ -1,5 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
-import { AuthStore, authFromSettings, migrateAuth, type AuthData, type MigrationResult } from "../../src/sync/auth-store";
+import {
+  AuthStore,
+  authFromSettings,
+  migrateAuth,
+  type AuthData,
+  type MigrationResult,
+  type SafeStorageLike
+} from "../../src/sync/auth-store";
 
 function makeLocalStorage() {
   const store = new Map<string, unknown>();
@@ -20,6 +27,28 @@ const SAMPLE: AuthData = {
   deploymentKey: "dk-1",
   userId: "user-1"
 };
+
+function makeSafeStorage(): SafeStorageLike & {
+  encrypted: string[];
+  decrypted: string[];
+} {
+  const safe = {
+    encrypted: [] as string[],
+    decrypted: [] as string[],
+    isEncryptionAvailable: vi.fn(() => true),
+    encryptString: vi.fn((plain: string) => {
+      safe.encrypted.push(plain);
+      return `sealed:${Buffer.from(plain, "utf8").toString("base64")}`;
+    }),
+    decryptString: vi.fn((ciphertext: string) => {
+      const encoded = ciphertext.replace(/^sealed:/, "");
+      const plain = Buffer.from(encoded, "base64").toString("utf8");
+      safe.decrypted.push(plain);
+      return plain;
+    })
+  };
+  return safe;
+}
 
 describe("AuthStore", () => {
   it("returns null when nothing stored", () => {
@@ -50,6 +79,54 @@ describe("AuthStore", () => {
     ls.store.set("pkv-sync-auth", { token: "x" }); // no deviceId
     const auth = new AuthStore(ls.load, ls.save);
     expect(auth.load()).toBeNull();
+  });
+
+  it("ignores malformed stored auth field types", () => {
+    const ls = makeLocalStorage();
+    ls.store.set("pkv-sync-auth", {
+      deviceId: "dev-1",
+      token: 123,
+      serverUrl: ["https://sync.example.com"],
+      deploymentKey: { value: "dk" },
+      userId: false
+    });
+    const auth = new AuthStore(ls.load, ls.save);
+    expect(auth.load()).toBeNull();
+  });
+
+  it("stores only an encrypted safeStorage envelope when secure storage is available", () => {
+    const ls = makeLocalStorage();
+    const safe = makeSafeStorage();
+    const auth = new AuthStore(ls.load, ls.save, safe);
+
+    auth.save(SAMPLE);
+
+    const stored = ls.store.get("pkv-sync-auth");
+    expect(stored).toEqual({
+      version: 1,
+      kind: "electron-safe-storage",
+      ciphertext: expect.any(String)
+    });
+    expect(JSON.stringify(stored)).not.toContain("tok-1");
+    expect(JSON.stringify(stored)).not.toContain("dk-1");
+    expect(safe.encrypted[0]).toContain("tok-1");
+    expect(auth.load()).toEqual(SAMPLE);
+  });
+
+  it("migrates legacy plaintext localStorage auth into an encrypted envelope", () => {
+    const ls = makeLocalStorage();
+    ls.store.set("pkv-sync-auth", SAMPLE);
+    const safe = makeSafeStorage();
+    const auth = new AuthStore(ls.load, ls.save, safe);
+
+    expect(auth.load()).toEqual(SAMPLE);
+
+    const stored = ls.store.get("pkv-sync-auth");
+    expect(JSON.stringify(stored)).not.toContain("tok-1");
+    expect(stored).toMatchObject({
+      version: 1,
+      kind: "electron-safe-storage"
+    });
   });
 });
 
@@ -113,6 +190,25 @@ describe("migrateAuth", () => {
     expect((result.strippedData as any).syncIndexes).toEqual({ a: { lastSyncedCommit: "c", files: {} } });
   });
 
+  it("legacy top-level auth is migrated and stripped from data.json", () => {
+    const ls = makeLocalStorage();
+    const auth = new AuthStore(ls.load, ls.save);
+    const data = { ...legacySettings, settings: { deviceName: "Laptop" } };
+    const result = migrateAuth(auth, data);
+
+    expect(result.kind).toBe("migrated");
+    expect(auth.load()).toEqual({
+      deviceId: "dev-1", token: "tok-1", serverUrl: "https://s", deploymentKey: "dk", userId: "u"
+    });
+    const stripped = result.strippedData as Record<string, unknown>;
+    expect(stripped.deviceId).toBeUndefined();
+    expect(stripped.token).toBeUndefined();
+    expect(stripped.serverUrl).toBeUndefined();
+    expect(stripped.deploymentKey).toBeUndefined();
+    expect(stripped.userId).toBeUndefined();
+    expect((stripped.settings as Record<string, unknown>).deviceName).toBe("Laptop");
+  });
+
   it("already migrated (localStorage has auth) but data.json still has residue → cleanup, strips residue", () => {
     const ls = makeLocalStorage();
     const auth = new AuthStore(ls.load, ls.save);
@@ -122,6 +218,20 @@ describe("migrateAuth", () => {
     expect(result.kind).toBe("already-migrated");
     expect((result.strippedData as any).settings.token).toBeUndefined();
     expect((result.strippedData as any).settings.username).toBe("alice");
+  });
+
+  it("already migrated top-level auth residue is stripped from data.json", () => {
+    const ls = makeLocalStorage();
+    const auth = new AuthStore(ls.load, ls.save);
+    auth.save({ deviceId: "dev-1", token: "tok-1", serverUrl: "https://s", deploymentKey: "dk", userId: "u" });
+    const data = { ...legacySettings, settings: { username: "alice" } };
+    const result = migrateAuth(auth, data);
+
+    expect(result.kind).toBe("already-migrated");
+    const stripped = result.strippedData as Record<string, unknown>;
+    expect(stripped.token).toBeUndefined();
+    expect(stripped.deploymentKey).toBeUndefined();
+    expect((stripped.settings as Record<string, unknown>).username).toBe("alice");
   });
 
   it("already migrated, no residue → already-migrated, no strip needed", () => {
