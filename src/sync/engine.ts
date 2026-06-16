@@ -7,7 +7,7 @@ import type { VaultSettings } from "../api/types";
 import { format, strings, type Strings } from "../i18n";
 import { createPathMatcher } from "./exclude";
 import { conflictPath } from "./conflict";
-import { sha256Bytes, sha256Text } from "./hash";
+import { sha256Bytes, sha256Text, sha256TextWithLength } from "./hash";
 import { guessMime } from "./mime";
 import {
   markDeleted,
@@ -16,7 +16,6 @@ import {
   markSynced,
   pendingFiles
 } from "./index-store";
-import { textByteLength } from "./text-encoding";
 import type { PushChange } from "./types";
 import type { LocalFileSnapshot, LocalIndex, PullFile, PullResponse } from "./types";
 import { debugLog, errorToMessage } from "../util";
@@ -392,6 +391,10 @@ export class SyncEngine {
 
   private async applyPull(pull: PullResponse): Promise<PendingScan | null> {
     if (!pull.to) return null;
+    if (pull.added.length === 0 && pull.modified.length === 0 && pull.deleted.length === 0) {
+      await this.advanceIndexHead(pull.to);
+      return null;
+    }
     let index = await this.opts.index.loadIndex();
     const current = await this.opts.vault.scan(this.opts.textExtensions, index);
     const currentByPath = new Map(current.map((file) => [file.path, file]));
@@ -413,7 +416,7 @@ export class SyncEngine {
 
         if (file.file_type === "text") {
           const content = await this.pulledTextContent(file, pull.to, pulledText);
-          const hash = await sha256Text(content);
+          const { hash, byteLength } = await sha256TextWithLength(content);
           if (local?.kind === "text" && local.hash === hash) {
             touched.push(local);
             continue;
@@ -425,7 +428,7 @@ export class SyncEngine {
           touched.push({
             path: file.path,
             hash,
-            size: textByteLength(content),
+            size: byteLength,
             kind: "text",
             content
           });
@@ -580,8 +583,7 @@ export class SyncEngine {
     // updateIndex serialises through the underlying data store so two
     // concurrent inline-event handlers cannot observe stale state or
     // overwrite each other's index updates.
-    const hash = await sha256Text(content);
-    const size = textByteLength(content);
+    const { hash, byteLength: size } = await sha256TextWithLength(content);
     const snapshot: LocalFileSnapshot = { path, hash, size, kind: "text", content };
     await this.opts.index.updateIndex(async (index) => {
       const indexed = index.files[path];
