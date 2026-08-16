@@ -1,7 +1,6 @@
 import { TFile, TFolder, type Vault } from "obsidian";
 import { isConflictPath } from "./conflict-files";
-import { sha256Bytes, sha256Text } from "./hash";
-import { textByteLength } from "./text-encoding";
+import { sha256Bytes, sha256TextWithLength } from "./hash";
 import type { LocalFileSnapshot, LocalIndex } from "./types";
 import { isTextPath } from "../util";
 
@@ -13,20 +12,36 @@ export interface VaultAdapter {
   readBinary(path: string): Promise<ArrayBuffer>;
   writeText(path: string, content: string): Promise<void>;
   writeBinary(path: string, bytes: ArrayBuffer): Promise<void>;
-  delete(path: string): Promise<void>;
+  trash(path: string): Promise<void>;
   exists(path: string): boolean;
   snapshot(path: string, textExtensions: Set<string>): Promise<LocalFileSnapshot>;
   scan(
     textExtensions: Set<string>,
-    previousIndex?: LocalIndex
+    previousIndex?: LocalIndex,
+    options?: VaultScanOptions
   ): Promise<LocalFileSnapshot[]>;
+}
+
+export interface VaultScanOptions {
+  retainPayload?: boolean;
 }
 
 export class ObsidianVaultAdapter implements VaultAdapter {
   constructor(private vault: Vault) {}
 
   listFiles(): TFile[] {
-    return this.vault.getFiles();
+    const files = this.vault.getFiles();
+    // Obsidian's vault.getFiles() reads the file cache, which does not index
+    // the .obsidian directory. Walk that folder subtree directly so allowlisted
+    // .obsidian paths (themes, snippets, plugin configs) are discoverable for
+    // sync. Paths already returned by getFiles() are deduplicated.
+    const known = new Set(files.map((file) => file.path));
+    const obsidian = this.vault.getAbstractFileByPath(".obsidian");
+    const extra: TFile[] = [];
+    if (obsidian instanceof TFolder) {
+      collectFilesRecursive(obsidian, known, extra);
+    }
+    return extra.length === 0 ? files : files.concat(extra);
   }
 
   async readText(path: string): Promise<string> {
@@ -57,10 +72,10 @@ export class ObsidianVaultAdapter implements VaultAdapter {
     }
   }
 
-  async delete(path: string): Promise<void> {
+  async trash(path: string): Promise<void> {
     const safePath = requireSafeVaultPath(path);
     const file = this.vault.getAbstractFileByPath(safePath);
-    if (file) await this.vault.delete(file);
+    if (file) await this.vault.trash(file, true);
   }
 
   exists(path: string): boolean {
@@ -76,10 +91,11 @@ export class ObsidianVaultAdapter implements VaultAdapter {
     const file = this.requireFile(path);
     if (isTextPath(path, textExtensions)) {
       const content = await this.readText(path);
+      const { hash, byteLength } = await sha256TextWithLength(content);
       return {
         path,
-        hash: await sha256Text(content),
-        size: textByteLength(content),
+        hash,
+        size: byteLength,
         mtime: file.stat.mtime,
         kind: "text",
         content
@@ -98,7 +114,8 @@ export class ObsidianVaultAdapter implements VaultAdapter {
 
   async scan(
     textExtensions: Set<string>,
-    _previousIndex?: LocalIndex
+    previousIndex?: LocalIndex,
+    options?: VaultScanOptions
   ): Promise<LocalFileSnapshot[]> {
     const files = this.listFiles().filter((file) => shouldSyncPath(file.path));
     const out: LocalFileSnapshot[] = [];
@@ -110,7 +127,18 @@ export class ObsidianVaultAdapter implements VaultAdapter {
       );
       for (const [batchIndex, result] of results.entries()) {
         if (result.status === "rejected") throw result.reason;
-        out[batch[batchIndex].index] = result.value;
+        const snapshot = result.value;
+        // The initial scan can contain thousands of changed files. Let the
+        // caller retain only metadata and hydrate each bounded push batch
+        // immediately before upload instead of keeping every payload in RAM.
+        if (
+          options?.retainPayload === false ||
+          previousIndex?.files[snapshot.path]?.lastSyncedHash === snapshot.hash
+        ) {
+          delete snapshot.content;
+          delete snapshot.bytes;
+        }
+        out[batch[batchIndex].index] = snapshot;
       }
     }
     return out;
@@ -141,6 +169,17 @@ export function shouldSyncPath(path: string): boolean {
   return normalizeSyncPath(path) !== null;
 }
 
+function collectFilesRecursive(folder: TFolder, known: Set<string>, out: TFile[]): void {
+  for (const child of folder.children) {
+    if (child instanceof TFolder) {
+      collectFilesRecursive(child, known, out);
+    } else if (child instanceof TFile && !known.has(child.path)) {
+      known.add(child.path);
+      out.push(child);
+    }
+  }
+}
+
 export function shouldAcceptRemoteConflictPath(path: string): boolean {
   const normalized = normalizeVaultPath(path);
   return (
@@ -150,7 +189,7 @@ export function shouldAcceptRemoteConflictPath(path: string): boolean {
   );
 }
 
-export function normalizeSyncPath(path: string): string | null {
+function normalizeSyncPath(path: string): string | null {
   const normalized = normalizeVaultPath(path);
   if (normalized === null) return null;
   if (isConflictPath(normalized)) return null;

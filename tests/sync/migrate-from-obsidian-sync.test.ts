@@ -192,6 +192,63 @@ describe("scanVaultForMigration", () => {
     expect(result.skippedCount).toBe(13);
     expect(result.totalBytes).toBe(46);
   });
+
+  it("excludes other plugins' plaintext credentials from migration uploads", () => {
+    const vault = new FakeVault();
+    vault.addFile(".obsidian/plugins/other-plugin/data.json", 40);
+    vault.addFile(".obsidian/plugins/other-plugin/main.js", 20);
+    vault.addFile(".obsidian/app.json", 30);
+    vault.addFile("notes/x.md", 10);
+
+    const result = scanVaultForMigration(vault);
+
+    expect(result.files.map((file) => file.path)).toEqual([
+      ".obsidian/app.json",
+      "notes/x.md"
+    ]);
+    expect(result.skippedCount).toBe(2);
+  });
+
+  it("excludes root and nested .env files from migration uploads", () => {
+    const vault = new FakeVault();
+    vault.addFile(".env", 10);
+    vault.addFile(".env.local", 10);
+    vault.addFile("config/.env.production", 10);
+    vault.addFile("notes/keep.md", 10);
+
+    const result = scanVaultForMigration(vault);
+
+    expect(result.files.map((file) => file.path)).toEqual(["notes/keep.md"]);
+    expect(result.skippedCount).toBe(3);
+  });
+
+  it("default-denies hidden paths outside the safe .obsidian core allowlist", () => {
+    const vault = new FakeVault();
+    vault.addFile(".obsidian/appearance.json", 10);
+    vault.addFile(".obsidian/core-plugins.json", 10);
+    vault.addFile(".obsidian/core-plugins-migration.json", 10);
+    vault.addFile(".obsidian/hotkeys.json", 10);
+    vault.addFile(".obsidian/graph.json", 10);
+    vault.addFile(".obsidian/bookmarks.json", 10);
+    vault.addFile(".obsidian/community-plugins.json", 10);
+    vault.addFile(".obsidian/templates/daily.md", 10);
+    vault.addFile(".obsidian/themes/minus.css", 10);
+    vault.addFile(".vscode/settings.json", 10);
+    vault.addFile("notes/.hidden.md", 10);
+
+    const result = scanVaultForMigration(vault);
+
+    expect(result.files.map((file) => file.path)).toEqual([
+      ".obsidian/appearance.json",
+      ".obsidian/core-plugins.json",
+      ".obsidian/core-plugins-migration.json",
+      ".obsidian/hotkeys.json",
+      ".obsidian/graph.json",
+      ".obsidian/bookmarks.json",
+      ".obsidian/community-plugins.json"
+    ]);
+    expect(result.skippedCount).toBe(4);
+  });
 });
 
 describe("migrateToPkv", () => {
@@ -260,6 +317,37 @@ describe("migrateToPkv", () => {
       ifMatch: "c1",
       changes: [{ kind: "text", path: "c.md", content: "c" }]
     });
+  });
+
+  it("snapshots per batch, interleaving reads with pushes to bound memory", async () => {
+    const vault = new FakeVault();
+    for (let i = 0; i < 6; i++) vault.addFile(`note-${i}.md`, 1, `n${i}`);
+    const api = new FakeMigrationApi();
+    const reads: string[] = [];
+    const pushes: number[] = [];
+    const origRead = vault.read.bind(vault);
+    vi.spyOn(vault, "read").mockImplementation(async (file) => {
+      reads.push(file.path);
+      return origRead(file);
+    });
+    const origPush = api.push.bind(api);
+    vi.spyOn(api, "push").mockImplementation(async (...args) => {
+      pushes.push(reads.length);
+      return origPush(...args);
+    });
+
+    const result = await migrateToPkv({
+      vault,
+      api,
+      vaultName: "Streamed vault",
+      deviceName: "Laptop",
+      textExtensions: new Set(["md"]),
+      batchSize: 2
+    });
+
+    expect(result.batches).toBe(3);
+    expect(pushes).toEqual([2, 4, 6]);
+    expect(reads).toHaveLength(6);
   });
 
   it("uploads binary blobs before pushing blob changes", async () => {

@@ -2,7 +2,7 @@ import type { TFile } from "obsidian";
 
 export interface ConflictFileVault {
   getFiles(): TFile[];
-  delete(file: TFile): Promise<void>;
+  trash(file: TFile, system: boolean): Promise<void>;
 }
 
 interface ConflictFileReader {
@@ -29,7 +29,7 @@ export async function deleteConflictFiles(
 ): Promise<number> {
   const files = listConflictFiles(vault);
   for (const file of files) {
-    await vault.delete(file);
+    await vault.trash(file, true);
   }
   return files.length;
 }
@@ -75,10 +75,10 @@ export function pairConflicts(
     .filter((x): x is ConflictPair => x !== null);
 }
 
-export async function pairConflictsWithKinds(
-  vault: Pick<ConflictFileVault, "getFiles"> & ConflictFileReader
+async function withKinds(
+  vault: ConflictFileReader & Pick<ConflictFileVault, "getFiles">,
+  pairs: ConflictPair[]
 ): Promise<ConflictPair[]> {
-  const pairs = pairConflicts(vault);
   return Promise.all(
     pairs.map(async (pair) => {
       const content = await vault.read(pair.conflictFile);
@@ -90,14 +90,18 @@ export async function pairConflictsWithKinds(
   );
 }
 
+export async function pairConflictsWithKinds(
+  vault: Pick<ConflictFileVault, "getFiles"> & ConflictFileReader
+): Promise<ConflictPair[]> {
+  return withKinds(vault, pairConflicts(vault));
+}
+
 export async function findConflictPairsForPathWithKinds(
   vault: Pick<ConflictFileVault, "getFiles"> & ConflictFileReader,
   path: string
 ): Promise<ConflictPair[]> {
-  const pairs = await pairConflictsWithKinds(vault);
-  return pairs.filter(
-    (pair) => pair.originalPath === path || pair.conflictPath === path
-  );
+  // Filter first so only the matched conflict files are read for their kind.
+  return withKinds(vault, findConflictPairsForPath(vault, path));
 }
 
 export function findConflictPairsForPath(

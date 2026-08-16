@@ -10,11 +10,11 @@ import { conflictPath } from "./conflict";
 import { sha256Bytes, sha256Text, sha256TextWithLength } from "./hash";
 import { guessMime } from "./mime";
 import {
+  markBatch,
   markDeleted,
   markFilesDeleted,
   markFilesSynced,
-  markSynced,
-  pendingFiles
+  markSynced
 } from "./index-store";
 import type { PushChange } from "./types";
 import type { LocalFileSnapshot, LocalIndex, PullFile, PullResponse } from "./types";
@@ -26,6 +26,7 @@ import {
 } from "./vault-adapter";
 
 const BLOB_UPLOAD_CONCURRENCY = 4;
+const MAX_PUSH_CHANGES = 1000;
 
 interface PendingScan {
   pending: LocalFileSnapshot[];
@@ -201,7 +202,9 @@ export class SyncEngine {
     index: LocalIndex;
   }> {
     const index = await this.opts.index.loadIndex();
-    const current = await this.opts.vault.scan(this.opts.textExtensions, index);
+    const current = await this.opts.vault.scan(this.opts.textExtensions, index, {
+      retainPayload: false
+    });
     return this.scanPendingFrom(index, current);
   }
 
@@ -210,21 +213,36 @@ export class SyncEngine {
     current: LocalFileSnapshot[]
   ): PendingScan {
     const pathAccepted = this.currentPathMatcher();
-    const filtered = current.filter((f) => pathAccepted(f.path));
-    const currentPaths = new Set(filtered.map((f) => f.path));
-    const deletedFromIndex = Object.keys(index.files).filter((p) => !currentPaths.has(p));
-    return {
-      pending: pendingFiles(index, filtered),
-      deleted: deletedFromIndex.filter((p) => pathAccepted(p)),
-      index
-    };
+    const currentPaths = new Set<string>();
+    const pending: LocalFileSnapshot[] = [];
+    for (const file of current) {
+      if (!pathAccepted(file.path)) continue;
+      currentPaths.add(file.path);
+      if (index.files[file.path]?.lastSyncedHash !== file.hash) {
+        pending.push(file);
+      }
+    }
+    const deleted = Object.keys(index.files).filter(
+      (p) => !currentPaths.has(p) && pathAccepted(p)
+    );
+    return { pending, deleted, index };
   }
+
+  private matcherCache = new Map<string, (path: string) => boolean>();
 
   private currentPathMatcher(): (path: string) => boolean {
     const userExcludes = this.opts.extraExcludeGlobs ?? [];
     const userAllowlist =
       this.vaultSettingsCache.get(this.opts.vaultId)?.extra_sync_globs ?? [];
-    return createPathMatcher({ userExcludes, userAllowlist });
+    // Compile the glob matcher once per settings value (exact key, no TTL) so
+    // the same exclude/allowlist sets are not recompiled on every sync pass.
+    const key = JSON.stringify([userExcludes, userAllowlist]);
+    let matcher = this.matcherCache.get(key);
+    if (!matcher) {
+      matcher = createPathMatcher({ userExcludes, userAllowlist });
+      this.matcherCache.set(key, matcher);
+    }
+    return matcher;
   }
 
   private async syncInner(): Promise<void> {
@@ -294,80 +312,109 @@ export class SyncEngine {
     const { pending, deleted, index } = scan ?? await this.scanPending();
     if (pending.length === 0 && deleted.length === 0) return;
 
-    const blobFiles = pending.filter((file) => file.kind === "blob");
-    const blobHashes = blobFiles.map((file) => file.hash);
-    const missing =
-      blobHashes.length > 0
-        ? (await this.opts.api.uploadCheck(this.opts.vaultId, blobHashes)).missing
-        : [];
-    const missingSet = new Set(missing);
-    await uploadMissingBlobs(
-      this.opts.api,
-      this.opts.vaultId,
-      blobFiles.filter((file) => missingSet.has(file.hash))
-    );
-
-    const changes: PushChange[] = [
-      ...pending.map((file) => {
-        if (file.kind === "text") {
-          return {
-            kind: "text" as const,
-            path: file.path,
-            content: file.content ?? ""
-          };
-        }
-        return {
-          kind: "blob" as const,
-          path: file.path,
-          blob_hash: file.hash,
-          size: file.size,
-          mime: guessMime(file.path)
-        };
-      }),
+    type PendingPushItem =
+      | { kind: "file"; file: LocalFileSnapshot }
+      | { kind: "delete"; path: string };
+    const items: PendingPushItem[] = [
+      ...pending.map((file) => ({ kind: "file" as const, file })),
       ...deleted.map((path) => ({ kind: "delete" as const, path }))
     ];
-    if (changes.length > 1000) {
-      throw new Error(
-        "Too many pending changes for one sync pass; run manual sync after reducing batch size"
-      );
-    }
+    let ifMatch = index.lastSyncedCommit;
 
-    const response = await this.opts.api.push(
-      this.opts.vaultId,
-      index.lastSyncedCommit,
-      changes,
-      this.opts.deviceName
-    );
+    for (let offset = 0; offset < items.length; offset += MAX_PUSH_CHANGES) {
+      const batch = items.slice(offset, offset + MAX_PUSH_CHANGES);
+      const batchPending = batch
+        .filter(
+          (item): item is { kind: "file"; file: LocalFileSnapshot } =>
+            item.kind === "file"
+        )
+        .map((item) => item.file);
+      const batchDeleted = batch
+        .filter(
+          (item): item is { kind: "delete"; path: string } =>
+            item.kind === "delete"
+        )
+        .map((item) => item.path);
+      const hydrated = await this.hydratePendingFiles(batchPending);
+
+      const blobFiles = hydrated.filter((file) => file.kind === "blob");
+      const blobHashes = blobFiles.map((file) => file.hash);
+      const missing =
+        blobHashes.length > 0
+          ? (await this.opts.api.uploadCheck(this.opts.vaultId, blobHashes)).missing
+          : [];
+      const missingSet = new Set(missing);
+      await uploadMissingBlobs(
+        this.opts.api,
+        this.opts.vaultId,
+        blobFiles.filter((file) => missingSet.has(file.hash))
+      );
+
+      const changes: PushChange[] = [
+        ...hydrated.map((file) => {
+          if (file.kind === "text") {
+            return {
+              kind: "text" as const,
+              path: file.path,
+              content: file.content ?? ""
+            };
+          }
+          return {
+            kind: "blob" as const,
+            path: file.path,
+            blob_hash: file.hash,
+            size: file.size,
+            mime: guessMime(file.path)
+          };
+        }),
+        ...batchDeleted.map((path) => ({ kind: "delete" as const, path }))
+      ];
+      const response = await this.opts.api.push(
+        this.opts.vaultId,
+        ifMatch,
+        changes,
+        this.opts.deviceName
+      );
 
     // Check if any merge outcome is non-clean (merged or conflict).
     // If so, record per-file hashes but do NOT advance lastSyncedCommit
     // so the subsequent pull includes the merge commit in its range.
-    const hasNonClean = response.merge_outcomes?.some(
-      (o) => o.outcome !== "clean"
-    ) ?? false;
+      const hasNonClean = response.merge_outcomes?.some(
+        (o) => o.outcome !== "clean"
+      ) ?? false;
 
-    if (!hasNonClean) {
+      if (!hasNonClean) {
       // All-clean (or field absent) — fast path: advance head immediately
-      const pendingFiles = pending;
-      const deletedPaths = deleted;
-      await this.opts.index.updateIndex((current) => {
-        let next = markSynced(current, response.new_commit, pendingFiles);
-        next = markDeleted(next, response.new_commit, deletedPaths);
-        return next;
-      });
-    } else {
+        await this.opts.index.updateIndex((current) => {
+          return markBatch(current, response.new_commit, hydrated, batchDeleted, true);
+        });
+        ifMatch = response.new_commit;
+      } else {
       // Non-clean merge outcome — per-file hashes recorded, HEAD STAYS.
       // The subsequent pull will bring the merged content and advance head.
       // Use updateIndex to avoid regressing lastSyncedCommit if a concurrent
       // SSE event advanced it between our scan and this write.
-      const pendingFiles = pending;
-      const deletedPaths = deleted;
-      await this.opts.index.updateIndex((current) => {
-        let next = markFilesSynced(current, pendingFiles);
-        next = markFilesDeleted(next, deletedPaths);
-        return next;
-      });
+        await this.opts.index.updateIndex((current) => {
+          return markBatch(current, current.lastSyncedCommit, hydrated, batchDeleted, false);
+        });
+      }
     }
+  }
+
+  private async hydratePendingFiles(
+    files: LocalFileSnapshot[]
+  ): Promise<LocalFileSnapshot[]> {
+    return Promise.all(
+      files.map(async (file) => {
+        const hasPayload =
+          file.kind === "text"
+            ? file.content !== undefined
+            : file.bytes !== undefined;
+        return hasPayload
+          ? file
+          : this.opts.vault.snapshot(file.path, this.opts.textExtensions);
+      })
+    );
   }
 
   private async pushPendingWithHeadMismatchRetry(
@@ -398,7 +445,10 @@ export class SyncEngine {
     let index = await this.opts.index.loadIndex();
     const current = await this.opts.vault.scan(this.opts.textExtensions, index);
     const currentByPath = new Map(current.map((file) => [file.path, file]));
-    const nextCurrentByPath = new Map(currentByPath);
+    // Copy lazily: if the pull applies nothing, the original map is reused.
+    let nextCurrentByPath: Map<string, LocalFileSnapshot> | null = null;
+    const copyCurrentByPath = (): Map<string, LocalFileSnapshot> =>
+      (nextCurrentByPath ??= new Map(currentByPath));
     const pathAccepted = this.currentPathMatcher();
     const pulledText = new Map<string, string>();
     const touched: LocalFileSnapshot[] = [];
@@ -467,7 +517,7 @@ export class SyncEngine {
         if (isLocalDirty(local, indexed?.lastSyncedHash)) {
           await this.writeConflict(path, local);
         }
-        await this.opts.vault.delete(path);
+        await this.opts.vault.trash(path);
         deleted.push(path);
       }
     } catch (error) {
@@ -487,13 +537,13 @@ export class SyncEngine {
     index = appliedIndex ?? index;
     for (const file of touched) {
       if (shouldSyncPath(file.path)) {
-        nextCurrentByPath.set(file.path, file);
+        copyCurrentByPath().set(file.path, file);
       }
     }
     for (const path of deleted) {
-      nextCurrentByPath.delete(path);
+      copyCurrentByPath().delete(path);
     }
-    return this.scanPendingFrom(index, [...nextCurrentByPath.values()]);
+    return this.scanPendingFrom(index, [...(nextCurrentByPath ?? currentByPath).values()]);
   }
 
   private async pulledTextContent(
@@ -636,7 +686,7 @@ export class SyncEngine {
           return index;
         }
       }
-      await this.opts.vault.delete(path);
+      await this.opts.vault.trash(path);
       return markDeleted(index, commit, [path]);
     });
   }
