@@ -85,10 +85,6 @@ class FakeIndex implements IndexPersistence {
   async loadIndex(): Promise<LocalIndex> {
     return this.idx;
   }
-  async saveIndex(index: LocalIndex): Promise<void> {
-    this.saved = index;
-    this.idx = index;
-  }
   async updateIndex(
     updater: (index: LocalIndex) => LocalIndex | Promise<LocalIndex>
   ): Promise<void> {
@@ -150,6 +146,81 @@ describe("SyncEngine inline apply dirty detection", () => {
     expect(cleanHash).toBeTypeOf("string");
   });
 
+  it("refuses to overwrite a local file that has no index entry (H-4)", async () => {
+    // A brand-new local file has no index entry until its first push lands.
+    // If a remote inline event for the same path arrives first (concurrent
+    // same-path create), the old code skipped the dirty check entirely and
+    // silently overwrote the local content — no conflict copy, data loss.
+    // "Not indexed" must be treated as dirty.
+    const vault = new FakeVault();
+    vault.store.set("note.md", "local draft never pushed");
+    const index = new FakeIndex({ lastSyncedCommit: "c0", files: {} });
+    const engine = buildEngine({ vault, index });
+
+    await expect(
+      (engine as never as { applyInlineText: (p: string, c: string, sha: string) => Promise<void> })
+        .applyInlineText("note.md", "remote content", "c1")
+    ).rejects.toBeInstanceOf(InlineApplyDirtyError);
+
+    // Crucially, the local content was NOT overwritten...
+    expect(vault.store.get("note.md")).toBe("local draft never pushed");
+    expect(vault.writes.size).toBe(0);
+    // ...and the index did not advance (the fallback pull will produce a
+    // .conflict-* copy instead).
+    expect(index.saved).toBeNull();
+  });
+
+  it("refuses to resurrect a file that is indexed but locally deleted (H-4)", async () => {
+    // The mirror case: the index entry exists but the local file was
+    // deleted. Applying the remote content would silently resurrect the
+    // file the user deleted — the unknown local state must be treated as
+    // dirty too, not skipped.
+    const vault = new FakeVault();
+    const indexedHash = await sha256Text("gone content");
+    const index = new FakeIndex({
+      lastSyncedCommit: "c0",
+      files: {
+        "note.md": {
+          lastSyncedHash: indexedHash,
+          lastSyncedAt: 1,
+          size: 12,
+          kind: "text"
+        }
+      }
+    });
+    const engine = buildEngine({ vault, index });
+
+    await expect(
+      (engine as never as { applyInlineText: (p: string, c: string, sha: string) => Promise<void> })
+        .applyInlineText("note.md", "remote content", "c1")
+    ).rejects.toBeInstanceOf(InlineApplyDirtyError);
+
+    // Nothing written, index untouched.
+    expect(vault.writes.size).toBe(0);
+    expect(index.saved).toBeNull();
+  });
+
+  it("does not silently delete an un-indexed path on a remote inline delete (H-4)", async () => {
+    // applyDelete mirrors applyInlineText: a path with no index entry is a
+    // local file we know nothing about (never pushed). Applying the remote
+    // delete trashes content whose history is nowhere else. Refuse and fall
+    // back to the full pull, which decides with a conflict copy if needed.
+    const vault = new FakeVault();
+    vault.store.set("note.md", "local draft never pushed");
+    const index = new FakeIndex({ lastSyncedCommit: "c0", files: {} });
+    const engine = buildEngine({ vault, index });
+
+    await expect(
+      (engine as never as { applyDelete: (p: string, sha: string) => Promise<void> })
+        .applyDelete("note.md", "c1")
+    ).rejects.toBeInstanceOf(InlineApplyDirtyError);
+
+    expect(vault.store.get("note.md")).toBe("local draft never pushed");
+    expect(vault.deletions).toEqual([]);
+    expect(vault.writes.size).toBe(0);
+    expect(index.saved).toBeNull();
+  });
+
   it("writes content when local matches index (clean state)", async () => {
     const vault = new FakeVault();
     vault.store.set("note.md", "synced text");
@@ -179,7 +250,7 @@ describe("SyncEngine inline apply dirty detection", () => {
   /// Regression: two concurrent applyInlineText calls
   /// must end with BOTH files reflected in the index. With the pre-fix
   /// load-modify-save pattern, the second call's loadIndex read the same
-  /// stale state as the first, so its saveIndex overwrote the first's
+  /// stale state as the first, so its full-index write overwrote the first's
   /// entry — losing one of the files.
   it("two concurrent applyInlineText calls both reach the index without loss", async () => {
     const vault = new FakeVault();

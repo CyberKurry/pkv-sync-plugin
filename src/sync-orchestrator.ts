@@ -13,6 +13,12 @@ export class SyncOrchestrator {
   constructor(private readonly plugin: PKVSyncPlugin) {}
 
   rebuild(): void {
+    // Abort any in-flight pass of the PREVIOUS generation before dropping
+    // the reference (audit M-10): without this the old engine keeps its
+    // old vault/server credentials and writes/trashes into the CURRENT
+    // local vault while its index writes are swallowed by the generation
+    // guard — unindexed mutations the new engine then misreads.
+    this.plugin.engine?.abort();
     const generation = ++this.plugin.syncGeneration;
     this.plugin.pushDebouncer?.cancel();
     if (this.plugin.pollTimer !== null) {
@@ -40,10 +46,6 @@ export class SyncOrchestrator {
       api: new SyncApi(this.plugin.api()),
       index: {
         loadIndex: () => this.plugin.loadSyncIndex(scopeKey),
-        saveIndex: async (index) => {
-          if (generation !== this.plugin.syncGeneration) return;
-          await this.plugin.saveSyncIndex(index, scopeKey);
-        },
         updateIndex: async (updater) => {
           if (generation !== this.plugin.syncGeneration) return;
           await this.plugin.updateSyncIndex(updater, scopeKey);
@@ -55,6 +57,7 @@ export class SyncOrchestrator {
               statusText(status, detail, this.plugin.text())
             )
           : undefined,
+      labels: this.plugin.text(),
       onSyncSuccess: () => this.plugin.recordSyncSuccess(generation),
       deviceId: this.plugin.settings.deviceId,
       serverUrl: this.plugin.settings.serverUrl,
@@ -76,11 +79,17 @@ export class SyncOrchestrator {
     this.plugin.fallbackTimer = window.setInterval(() => {
       this.plugin.pushDebouncer?.trigger();
     }, fallbackMs);
-    void this.plugin.engine.syncNow();
+    // void: the kick promise must not be observable by callers, and any
+    // SyncAbortedError from a concurrently-rebuilt generation is already
+    // swallowed inside syncInner.
+    void this.plugin.engine.syncNow().catch(() => undefined);
   }
 
   invalidate(): void {
     this.plugin.engine?.stopEventSubscription();
+    // Same reasoning as rebuild(): an in-flight sync pass must stop before
+    // the engine reference is dropped (audit M-10).
+    this.plugin.engine?.abort();
     this.plugin.pushDebouncer?.cancel();
     if (this.plugin.pollTimer !== null) {
       window.clearInterval(this.plugin.pollTimer);
@@ -172,6 +181,9 @@ export class SyncOrchestrator {
       this.plugin.syncGeneration++;
       this.plugin.engine = null;
       this.plugin.statusEl = null;
+      // The final flush has finished (or timed out); stop the engine so a
+      // straggler pass cannot touch the vault after unload (M-10).
+      engine?.abort();
     })();
   }
 }
