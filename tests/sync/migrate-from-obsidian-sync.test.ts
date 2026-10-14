@@ -21,6 +21,7 @@ function tfolder(path: string): TFolder {
 }
 
 class FakeVault {
+  configDir = ".obsidian";
   private readonly entries = new Map<string, TFile | TFolder>();
   private readonly text = new Map<string, string>();
   private readonly binary = new Map<string, ArrayBuffer>();
@@ -248,6 +249,51 @@ describe("scanVaultForMigration", () => {
       ".obsidian/community-plugins.json"
     ]);
     expect(result.skippedCount).toBe(4);
+  });
+
+  it("follows a renamed config folder for both excludes and the core allowlist", () => {
+    const vault = new FakeVault();
+    vault.configDir = ".my-config";
+    vault.addFile(".my-config/sync/state.json", 1);
+    vault.addFile(".my-config/workspace.json", 2);
+    vault.addFile(".my-config/cache/db.json", 3);
+    vault.addFile(".my-config/community-plugins.json", 4);
+    vault.addFile(".my-config/plugins/other-plugin/data.json", 5);
+    vault.addFile(".obsidian/workspace.json", 6);
+    vault.addFile("notes/keep.md", 7);
+
+    const result = scanVaultForMigration(vault);
+
+    expect(result.files.map((file) => file.path)).toEqual([
+      ".my-config/community-plugins.json",
+      "notes/keep.md"
+    ]);
+    // `.obsidian/workspace.json` is still skipped, now by the hard excludes
+    // rather than by the hidden-path rule (R3-10 keeps the default config
+    // folder's device state excluded after a rename).
+    expect(result.skippedCount).toBe(5);
+  });
+
+  it("detects Obsidian Sync under a renamed config folder", async () => {
+    const vault = new FakeVault();
+    vault.configDir = ".my-config";
+    vault.addFolder(".my-config/sync");
+    vault.addFile(".my-config/community-plugins.json", 4, '["obsidian-sync"]');
+
+    await expect(detectObsidianSync(vault)).resolves.toEqual({
+      syncDirExists: true,
+      syncPluginEnabled: true,
+      likelyUsingSync: true
+    });
+
+    const other = new FakeVault();
+    other.configDir = ".my-config";
+    other.addFolder(".obsidian/sync");
+    await expect(detectObsidianSync(other)).resolves.toEqual({
+      syncDirExists: false,
+      syncPluginEnabled: false,
+      likelyUsingSync: false
+    });
   });
 });
 

@@ -15,6 +15,7 @@ vi.mock("../../src/api/events-client", () => ({
 }));
 
 class FakeVault {
+  configDir = ".obsidian";
   writes = new Map<string, string>();
   binaryWrites = new Map<string, ArrayBuffer>();
   deletions: string[] = [];
@@ -340,7 +341,7 @@ describe("SyncEngine abort (M-10)", () => {
         pollIntervalSeconds: 30,
         deviceId: "dev"
       },
-      manifest: { version: "1.6.0" },
+      manifest: { version: "1.6.1" },
       app: { vault: {} }
     };
     let generationAtCapture = 0;

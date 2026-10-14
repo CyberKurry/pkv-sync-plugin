@@ -1,26 +1,55 @@
-export const HARD_EXCLUDE_GLOBS = [
-  ".obsidian/workspace.json",
-  ".obsidian/workspace-mobile.json",
-  ".obsidian/workspaces.json",
-  ".obsidian/cache/**",
-  ".git/**",
-  ".trash/**",
-  ".conflict-*",
-  "*.lock",
-  "*.tmp"
-];
+/** Obsidian's default config folder; the vault may rename it (`Vault#configDir`). */
+export const DEFAULT_CONFIG_DIR = ".obsidian";
+
+export function hardExcludeGlobs(configDir: string): string[] {
+  // The active config folder plus Obsidian's default one (R3-10): renaming
+  // the folder leaves a stale `.obsidian` behind, and the server keeps
+  // hard-excluding `.obsidian/workspace.json` and `.obsidian/cache/**`
+  // literally. Allowing them here would only turn into `path_excluded`
+  // failures — or, for the cache, sync per-device UI state that must never
+  // travel. Only the device-state paths are excluded, not the whole folder:
+  // themes and snippets under a stale `.obsidian` remain ordinary hidden
+  // paths a user allowlist can still pick up.
+  const configDirs =
+    configDir === DEFAULT_CONFIG_DIR ? [configDir] : [configDir, DEFAULT_CONFIG_DIR];
+  return [
+    ...configDirs.flatMap((dir) => [
+      `${dir}/workspace.json`,
+      `${dir}/workspace-mobile.json`,
+      `${dir}/workspaces.json`,
+      `${dir}/cache/**`
+    ]),
+    ".git/**",
+    ".trash/**",
+    ".conflict-*",
+    "*.lock",
+    "*.tmp"
+  ];
+}
 
 export interface PathAcceptsOptions {
   userExcludes: string[];
   userAllowlist: string[];
+  configDir: string;
 }
 
 type PathMatcher = (path: string) => boolean;
 
-const HARD_EXCLUDE_MATCHER = createExcludeMatcher(HARD_EXCLUDE_GLOBS);
+// Compiled per config folder so a custom config folder is honoured without
+// recompiling the hard-exclude globs on every sync pass.
+const HARD_EXCLUDE_MATCHERS = new Map<string, PathMatcher>();
+
+function hardExcludeMatcher(configDir: string): PathMatcher {
+  let matcher = HARD_EXCLUDE_MATCHERS.get(configDir);
+  if (!matcher) {
+    matcher = createExcludeMatcher(hardExcludeGlobs(configDir));
+    HARD_EXCLUDE_MATCHERS.set(configDir, matcher);
+  }
+  return matcher;
+}
 
 export function createPathMatcher(opts: PathAcceptsOptions): PathMatcher {
-  const hardExclude = HARD_EXCLUDE_MATCHER;
+  const hardExclude = hardExcludeMatcher(opts.configDir);
   const userExcludes = createExcludeMatcher(opts.userExcludes);
   const userAllowlist = createExcludeMatcher(opts.userAllowlist);
 

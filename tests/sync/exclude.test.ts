@@ -1,8 +1,18 @@
 import { describe, expect, it } from "vitest";
-import { createPathMatcher, type PathAcceptsOptions } from "../../src/sync/exclude";
+import {
+  createPathMatcher,
+  DEFAULT_CONFIG_DIR,
+  hardExcludeGlobs,
+  type PathAcceptsOptions
+} from "../../src/sync/exclude";
 
-function pathAccepts(path: string, opts: PathAcceptsOptions): boolean {
-  return createPathMatcher(opts)(path);
+// `configDir` defaults to Obsidian's config folder; tests override it to
+// prove a renamed config folder is followed.
+function pathAccepts(
+  path: string,
+  opts: Omit<PathAcceptsOptions, "configDir"> & { configDir?: string }
+): boolean {
+  return createPathMatcher({ configDir: DEFAULT_CONFIG_DIR, ...opts })(path);
 }
 
 function isExcluded(path: string, globs: string[]): boolean {
@@ -197,7 +207,7 @@ describe("createPathMatcher", () => {
       userExcludes: ["*.tmp", "private/**"],
       userAllowlist: [".obsidian/plugins/**"]
     };
-    const matcher = createPathMatcher(opts);
+    const matcher = createPathMatcher({ configDir: DEFAULT_CONFIG_DIR, ...opts });
     const paths = [
       "notes/today.md",
       "notes/draft.tmp",
@@ -210,5 +220,78 @@ describe("createPathMatcher", () => {
       expect(matcher(path)).toBe(pathAccepts(path, opts));
       expect(matcher(path)).toBe(pathAccepts(path, opts));
     }
+  });
+});
+
+describe("config folder", () => {
+  it("builds the hard exclude globs from the configured folder and the default", () => {
+    expect(hardExcludeGlobs(".my-config")).toEqual([
+      ".my-config/workspace.json",
+      ".my-config/workspace-mobile.json",
+      ".my-config/workspaces.json",
+      ".my-config/cache/**",
+      ".obsidian/workspace.json",
+      ".obsidian/workspace-mobile.json",
+      ".obsidian/workspaces.json",
+      ".obsidian/cache/**",
+      ".git/**",
+      ".trash/**",
+      ".conflict-*",
+      "*.lock",
+      "*.tmp"
+    ]);
+  });
+
+  it("does not duplicate the default folder when it is the configured one", () => {
+    expect(hardExcludeGlobs(DEFAULT_CONFIG_DIR)).toEqual([
+      ".obsidian/workspace.json",
+      ".obsidian/workspace-mobile.json",
+      ".obsidian/workspaces.json",
+      ".obsidian/cache/**",
+      ".git/**",
+      ".trash/**",
+      ".conflict-*",
+      "*.lock",
+      "*.tmp"
+    ]);
+  });
+
+  it("hard excludes the configured folder's device state instead of .obsidian's", () => {
+    expect(
+      pathAccepts(".my-config/workspace.json", {
+        userExcludes: [],
+        userAllowlist: ["**"],
+        configDir: ".my-config"
+      })
+    ).toBe(false);
+
+    // The stale `.obsidian` keeps its device-state excludes (R3-10): the
+    // server hard-excludes these paths literally, so letting them through
+    // would only fail as `path_excluded` on push.
+    expect(
+      pathAccepts(".obsidian/workspace.json", {
+        userExcludes: [],
+        userAllowlist: ["**"],
+        configDir: ".my-config"
+      })
+    ).toBe(false);
+
+    expect(
+      pathAccepts(".obsidian/cache/db.json", {
+        userExcludes: [],
+        userAllowlist: ["**"],
+        configDir: ".my-config"
+      })
+    ).toBe(false);
+
+    // The fix stays narrow: the rest of a stale `.obsidian` is an ordinary
+    // hidden folder that a user allowlist can still sync.
+    expect(
+      pathAccepts(".obsidian/themes/theme.css", {
+        userExcludes: [],
+        userAllowlist: ["**"],
+        configDir: ".my-config"
+      })
+    ).toBe(true);
   });
 });

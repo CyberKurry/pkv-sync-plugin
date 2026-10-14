@@ -42,7 +42,7 @@ export class SyncOrchestrator {
       deviceName: this.plugin.settings.deviceName,
       textExtensions,
       extraExcludeGlobs: this.plugin.settings.extraExcludeGlobs,
-      vault: new ObsidianVaultAdapter(this.plugin.app.vault),
+      vault: new ObsidianVaultAdapter(this.plugin.app),
       api: new SyncApi(this.plugin.api()),
       index: {
         loadIndex: () => this.plugin.loadSyncIndex(scopeKey),
@@ -121,7 +121,7 @@ export class SyncOrchestrator {
     const scheduleForFile = (file: unknown) => {
       const path =
         typeof file === "object" && file !== null && "path" in file
-          ? String((file as { path: unknown }).path)
+          ? String(file.path)
           : "";
       if (path && shouldSyncPath(path)) this.plugin.pushDebouncer?.trigger();
     };

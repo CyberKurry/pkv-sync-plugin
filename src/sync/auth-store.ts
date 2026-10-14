@@ -11,7 +11,8 @@ const SECURE_AUTH_KIND = "electron-safe-storage";
 const SECURE_AUTH_VERSION = 1;
 
 export type LocalStorageLoad = (key: string) => unknown;
-export type LocalStorageSave = (key: string, data: unknown | null) => void;
+/** `null` clears the stored value; any other value is persisted as-is. */
+export type LocalStorageSave = (key: string, data: unknown) => void;
 export type SafeStorageLike = {
   isEncryptionAvailable(): boolean;
   encryptString(plainText: string): string;
@@ -100,9 +101,28 @@ export class AuthStore {
   }
 }
 
+/** The Electron bridge `window` carries in the desktop renderer. */
+type ElectronHost = {
+  require?: (id: string) => unknown;
+  Buffer?: typeof Buffer;
+};
+
+/**
+ * Returns the Electron bridge, or `undefined` when there is no `window` at
+ * all. `typeof` is the only safe probe here (R3-3): desktop Obsidian exposes
+ * Electron's `require` on `window`, but Electron's main process, a worker, or
+ * any Node-side tool that imports this bundle has no `window` — a bare
+ * `window` identifier throws `ReferenceError` there, before the `requireFn`
+ * guard below could degrade to localStorage.
+ */
+function electronHost(): ElectronHost | undefined {
+  if (typeof window === "undefined") return undefined;
+  return window as unknown as ElectronHost;
+}
+
 export function createElectronSafeStorage(): SafeStorageLike | null {
-  const requireFn = (globalThis as { window?: { require?: (id: string) => unknown } }).window
-    ?.require;
+  const host = electronHost();
+  const requireFn = host?.require;
   if (!requireFn) return null;
   try {
     const electron = requireFn("electron") as {
@@ -113,7 +133,7 @@ export function createElectronSafeStorage(): SafeStorageLike | null {
       };
     };
     const safeStorage = electron.safeStorage;
-    const bufferCtor = (globalThis as { Buffer?: typeof Buffer }).Buffer;
+    const bufferCtor = host?.Buffer;
     if (!safeStorage || !bufferCtor) return null;
     return {
       isEncryptionAvailable: () => safeStorage.isEncryptionAvailable(),
