@@ -12,13 +12,29 @@ import type PKVSyncPlugin from "./main";
 export class SyncOrchestrator {
   constructor(private readonly plugin: PKVSyncPlugin) {}
 
+  /**
+   * Tear down the current engine generation: stop the SSE subscription
+   * FIRST, then abort any in-flight pass. Both rebuild() and invalidate()
+   * must run this identical sequence — abort() alone does not release the
+   * SSE connection (events-client owns its own controller and reconnect
+   * loop), so a rebuild that only aborted leaked one subscription per
+   * call until the server's 16-per-user SSE cap silently demoted sync to
+   * polling (V2).
+   */
+  private teardownEngine(): void {
+    this.plugin.engine?.stopEventSubscription();
+    // Same reasoning as the abort below (audit M-10): an in-flight sync
+    // pass must stop before the engine reference is dropped.
+    this.plugin.engine?.abort();
+  }
+
   rebuild(): void {
     // Abort any in-flight pass of the PREVIOUS generation before dropping
     // the reference (audit M-10): without this the old engine keeps its
     // old vault/server credentials and writes/trashes into the CURRENT
     // local vault while its index writes are swallowed by the generation
     // guard — unindexed mutations the new engine then misreads.
-    this.plugin.engine?.abort();
+    this.teardownEngine();
     const generation = ++this.plugin.syncGeneration;
     this.plugin.pushDebouncer?.cancel();
     if (this.plugin.pollTimer !== null) {
@@ -67,10 +83,19 @@ export class SyncOrchestrator {
     });
     this.plugin.engine.startEventSubscription();
     this.plugin.pushDebouncer = new Debouncer(this.plugin.settings.debounceMs, () => {
-      void this.plugin.engine?.syncNow();
+      this.kickSync();
     });
+    let pollTicks = 0;
     this.plugin.pollTimer = window.setInterval(() => {
-      void this.plugin.engine?.syncNow();
+      this.kickSync();
+      // W6: the server's text-extension set is mirrored on load and on
+      // every settings save; a long-running plugin would otherwise not
+      // notice a server-side change until reload. Refresh it on a low
+      // cadence from the poll timer.
+      pollTicks += 1;
+      if (pollTicks % 10 === 0) {
+        void this.plugin.refreshServerCapabilities().catch(() => undefined);
+      }
     }, this.plugin.settings.pollIntervalSeconds * 1000);
     const fallbackMs = Math.max(
       30_000,
@@ -79,17 +104,21 @@ export class SyncOrchestrator {
     this.plugin.fallbackTimer = window.setInterval(() => {
       this.plugin.pushDebouncer?.trigger();
     }, fallbackMs);
-    // void: the kick promise must not be observable by callers, and any
-    // SyncAbortedError from a concurrently-rebuilt generation is already
-    // swallowed inside syncInner.
-    void this.plugin.engine.syncNow().catch(() => undefined);
+    this.kickSync();
+  }
+
+  /**
+   * Fire-and-forget a sync pass (W4). `syncInner` rethrows for callers and
+   * the status element already shows the failure, so the rejection must be
+   * consumed here — otherwise every timer tick while offline produced an
+   * unhandled promise rejection.
+   */
+  private kickSync(): void {
+    void this.plugin.engine?.syncNow().catch(() => undefined);
   }
 
   invalidate(): void {
-    this.plugin.engine?.stopEventSubscription();
-    // Same reasoning as rebuild(): an in-flight sync pass must stop before
-    // the engine reference is dropped (audit M-10).
-    this.plugin.engine?.abort();
+    this.teardownEngine();
     this.plugin.pushDebouncer?.cancel();
     if (this.plugin.pollTimer !== null) {
       window.clearInterval(this.plugin.pollTimer);

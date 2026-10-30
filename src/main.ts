@@ -22,6 +22,7 @@ import {
   DEFAULT_SETTINGS,
   historyUiAvailable,
   normalizeDebounceMs,
+  normalizeTextExtensions,
   type PKVSyncSettings,
   isLoggedIn
 } from "./settings";
@@ -176,7 +177,9 @@ export default class PKVSyncPlugin extends Plugin {
       writePluginSettingsWithoutAuth(data, this.settings)
     );
     this.persistAuth();
-    void this.refreshServerCapabilities();
+    // W7: a rebuild-forbidden save (the migration path) must also forbid
+    // the mirror's own rebuild.
+    void this.refreshServerCapabilities(options.rebuild !== false);
     this.updateStatus();
     if (options.rebuild !== false) this.rebuildSyncEngine();
   }
@@ -373,7 +376,17 @@ export default class PKVSyncPlugin extends Plugin {
     return this.historyClient;
   }
 
-  private async refreshServerCapabilities(): Promise<void> {
+  /**
+   * Fetch GET /api/config and mirror the server-controlled knobs into
+   * local settings.
+   *
+   * `allowRebuild` is false on the migration path: the migration sets the
+   * new vault id, then calls saveSettings({rebuild:false}) BEFORE saving
+   * the migrated index. A mirror-triggered rebuild in that window would
+   * start an engine against the new vault with the OLD (empty) index and
+   * re-push the whole vault (W7).
+   */
+  async refreshServerCapabilities(allowRebuild = true): Promise<void> {
     if (
       !isFetchableServerUrl(this.settings.serverUrl) ||
       !this.settings.deploymentKey
@@ -390,8 +403,27 @@ export default class PKVSyncPlugin extends Plugin {
         cfg.push_debounce_ms,
         this.settings.debounceMs
       );
-      if (debounceMs !== this.settings.debounceMs) {
-        await this.saveSettingsPatch({ debounceMs }, { rebuild: true });
+      // S6: mirror the server's text-extension set on every config
+      // fetch. A stale local set makes the client push text files to
+      // paths the server has since reconfigured (or vice versa), and the
+      // resulting wrong_file_kind 400 wedges the whole batch — every
+      // sync pass re-sends the same rejected change forever.
+      const serverExtensions = normalizeTextExtensions(
+        cfg.supported_text_extensions
+      );
+      // W6: compare as sets — the server may reorder the array without
+      // changing it, and a string comparison then triggered a needless
+      // engine rebuild on every config fetch.
+      const extensionsChanged =
+        [...serverExtensions].sort().join("\u0000") !==
+        [...this.settings.textExtensions].sort().join("\u0000");
+      if (debounceMs !== this.settings.debounceMs || extensionsChanged) {
+        const patch: Partial<PKVSyncSettings> = { debounceMs };
+        if (extensionsChanged) {
+          this.settings.textExtensions = serverExtensions;
+          patch.textExtensions = serverExtensions;
+        }
+        await this.saveSettingsPatch(patch, { rebuild: allowRebuild });
       }
     } catch {
       this.serverCapabilities = null;
@@ -457,25 +489,33 @@ export default class PKVSyncPlugin extends Plugin {
   private openConflictResolutionFor(file: TFile): void {
     const pairsProvider = (): Promise<ConflictPair[]> =>
       findConflictPairsForPathWithKinds(this.app.vault, file.path);
-    void pairsProvider().then((pairs) => {
-      if (pairs.length === 0) {
-        new Notice(this.text().conflictsListEmpty);
-        return;
-      }
-      if (pairs.length === 1) {
-        const pair = pairs[0];
-        new ConflictResolveModal(
-          this.app,
-          pair,
-          this.text(),
-          () => {
-            this.pushDebouncer?.trigger();
-          }
-        ).open();
-        return;
-      }
-      this.openConflictsList(pairsProvider);
-    });
+    void pairsProvider()
+      .then((pairs) => {
+        if (pairs.length === 0) {
+          new Notice(this.text().conflictsListEmpty);
+          return;
+        }
+        if (pairs.length === 1) {
+          const pair = pairs[0];
+          new ConflictResolveModal(
+            this.app,
+            pair,
+            this.text(),
+            () => {
+              this.pushDebouncer?.trigger();
+            }
+          ).open();
+          return;
+        }
+        this.openConflictsList(pairsProvider);
+      })
+      .catch((error: unknown) => {
+        // V7: a sidecar vanishing between listing and reading rejected
+        // the whole read — the menu item silently did nothing.
+        new Notice(
+          `${this.text().conflictsListLoadFailed}: ${errorToMessage(error)}`
+        );
+      });
   }
 
   historyEnabled(): boolean {
@@ -789,7 +829,7 @@ export default class PKVSyncPlugin extends Plugin {
         detection,
         scan,
         initialVaultName,
-        onStart: async (vaultName, onProgress) => {
+        onStart: async (vaultName, onProgress, isCancelled) => {
           this.invalidateSyncEngine();
           const syncApi = new SyncApi(this.api());
           const api: MigrationApi = {
@@ -801,14 +841,32 @@ export default class PKVSyncPlugin extends Plugin {
             push: (vaultId, ifMatch, changes, deviceName) =>
               syncApi.push(vaultId, ifMatch, changes, deviceName)
           };
-          const result = await migrateToPkv({
-            vault: this.app.vault,
-            api,
-            vaultName,
-            deviceName: this.settings.deviceName,
-            textExtensions: new Set(this.settings.textExtensions),
-            onProgress
-          });
+          let result;
+          try {
+            result = await migrateToPkv({
+              vault: this.app.vault,
+              api,
+              vaultName,
+              deviceName: this.settings.deviceName,
+              textExtensions: new Set(this.settings.textExtensions),
+              onProgress
+            });
+          } catch (error) {
+            // The engine was invalidated before the migration started; a
+            // failed migration must not leave it null for the rest of the
+            // session (V3): file changes would silently no-op behind a
+            // status bar that still says "connected".
+            this.rebuildSyncEngine();
+            throw error;
+          }
+          if (isCancelled?.()) {
+            // V5: the user closed the migration modal while uploads were
+            // still running. The server-side vault may exist, but this
+            // device must not switch to it, save its index, or report
+            // success — the user cancelled.
+            this.rebuildSyncEngine();
+            return result;
+          }
           this.settings.selectedVaultId = result.vaultId;
           this.settings.selectedVaultName = result.vaultName;
           this.settings.lastSyncSuccessAt = Math.floor(Date.now() / 1000);

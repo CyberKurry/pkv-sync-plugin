@@ -112,6 +112,8 @@ export const ko = {
   inlineApplyFailed:
     "{path}의 실시간 업데이트를 적용하지 못했습니다: {reason}. 전체 동기화로 전환합니다.",
   conflictNotice: "PKV Sync 충돌: {path}",
+  conflictCopyFailed: "{path}의 충돌 사본을 작성하지 못했습니다: {reason}",
+  sseAuthFailed: "실시간 동기화가 중지되었습니다: 서버가 토큰을 거부했습니다",
   connectedToServer: "「{serverName}」에 연결되었습니다",
   changeServer: "서버 변경",
   loggedIn: "로그인됨",
@@ -127,6 +129,8 @@ export const ko = {
   vaultSyncAllowlistSaveButton: "저장",
   vaultSyncAllowlistSaved: ".obsidian 동기화 허용 목록을 저장했습니다",
   vaultSyncAllowlistLoadFailed: ".obsidian 동기화 허용 목록을 불러오지 못했습니다",
+  vaultSyncAllowlistNotLoaded: "현재 허용 목록이 아직 로드되지 않았습니다. 다시 로드한 후 저장하세요",
+  vaultSyncAllowlistRetryButton: "다시 로드",
   vaultSyncAllowlistSaveFailed: ".obsidian 동기화 허용 목록을 저장하지 못했습니다",
   currentDeviceSuffix: " (현재)",
   syncStatusTitle: "PKV Sync 상태",
@@ -216,6 +220,10 @@ export const ko = {
     "충돌과 함께 자동 병합됨 (수동 해결 필요)",
   acceptLocalButton: "로컬 유지",
   acceptRemoteButton: "원격 적용",
+  conflictDiskRemoteLabel: "이 기기의 파일 (원격 버전)",
+  conflictDiskAbsentLabel: "이 기기의 파일 (로컬에서 삭제됨)",
+  conflictSidecarLocalLabel: "충돌 사본 (로컬 편집 내용)",
+  conflictSidecarRemoteLabel: "충돌 사본 (원격 버전)",
   openInEditor: "편집기에서 열기",
   markResolved: "해결됨으로 표시",
   dismissConflictButton: "나중에",
@@ -224,7 +232,9 @@ export const ko = {
   conflictAcceptedRemoteNotice: "원격 버전을 적용했습니다. 다음 동기화 때 push됩니다",
   markersStillPresent:
     "파일에 충돌 마커가 아직 남아 있습니다. 먼저 편집기에서 해결하세요.",
-  conflictResolveFailed: "충돌 해결 실패"
+  conflictResolveFailed: "충돌 해결 실패",
+  conflictReadFailed: "충돌 파일을 읽을 수 없습니다: {reason}",
+  conflictsListLoadFailed: "충돌 파일을 로드하지 못했습니다",
 } satisfies typeof en;
 
 export const koInReview = true;

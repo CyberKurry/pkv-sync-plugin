@@ -104,6 +104,8 @@ export const ja = {
   inlineApplyFailed:
     "{path} のリアルタイム更新を適用できませんでした: {reason}。完全同期にフォールバックします。",
   conflictNotice: "PKV Sync の競合: {path}",
+  conflictCopyFailed: "競合コピーを書き込めませんでした（{path}）：{reason}",
+  sseAuthFailed: "リアルタイム同期を停止しました：サーバーがトークンを拒否しました",
   connectedToServer: "{serverName} に接続しました",
   changeServer: "サーバーを変更",
   loggedIn: "ログインしました",
@@ -119,6 +121,8 @@ export const ja = {
   vaultSyncAllowlistSaveButton: "保存",
   vaultSyncAllowlistSaved: ".obsidian 同期の許可リストを保存しました",
   vaultSyncAllowlistLoadFailed: ".obsidian 同期の許可リストの読み込みに失敗しました",
+  vaultSyncAllowlistNotLoaded: "現在の許可リストがまだ読み込まれていません。再読み込みしてから保存してください",
+  vaultSyncAllowlistRetryButton: "再読み込み",
   vaultSyncAllowlistSaveFailed: ".obsidian 同期の許可リストの保存に失敗しました",
   currentDeviceSuffix: "（現在のデバイス）",
   syncStatusTitle: "PKV Sync ステータス",
@@ -208,6 +212,10 @@ export const ja = {
     "自動マージで競合が発生しました（手動での解決が必要です）",
   acceptLocalButton: "ローカルを保持",
   acceptRemoteButton: "リモートを採用",
+  conflictDiskRemoteLabel: "この端末のファイル（リモート版）",
+  conflictDiskAbsentLabel: "この端末のファイル（ローカルで削除済み）",
+  conflictSidecarLocalLabel: "競合コピー（ローカルの編集内容）",
+  conflictSidecarRemoteLabel: "競合コピー（リモート版）",
   openInEditor: "エディタで開く",
   markResolved: "解決済みにする",
   dismissConflictButton: "後で",
@@ -216,7 +224,9 @@ export const ja = {
   conflictAcceptedRemoteNotice: "リモートのバージョンを採用しました。次回の同期で push されます",
   markersStillPresent:
     "ファイルに競合マーカーが残っています。先にエディタで解決してください。",
-  conflictResolveFailed: "競合の解決に失敗しました"
+  conflictResolveFailed: "競合の解決に失敗しました",
+  conflictReadFailed: "競合ファイルを読み込めませんでした：{reason}",
+  conflictsListLoadFailed: "競合ファイルの読み込みに失敗しました",
 } satisfies typeof en;
 
 export const jaInReview = true;

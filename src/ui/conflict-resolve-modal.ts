@@ -11,6 +11,7 @@ import {
 } from "../sync/unified-diff";
 import type { Strings } from "../i18n";
 import { format } from "../i18n";
+import { errorToMessage } from "../util";
 import { fillDiffCell } from "./diff-cells";
 
 const TEXT_DETECT_EXTENSIONS = new Set([
@@ -61,6 +62,7 @@ function looksBinary(sample: string): boolean {
 export class ConflictResolveModal extends Modal {
   private isMounted = false;
   private loadGeneration = 0;
+  private readFailed = false;
 
   constructor(
     app: App,
@@ -102,9 +104,13 @@ export class ConflictResolveModal extends Modal {
 
   private async loadContent(): Promise<void> {
     const generation = this.nextLoadGeneration();
+    this.readFailed = false;
     if (this.pair.kind === "merge_markers") {
       const rendered = await this.renderMergeMarkerFlow(generation);
       if (!rendered || !this.canRender(generation)) return;
+      // A read failure already rendered its own retry actions (V8);
+      // only a successful read gets the resolve actions.
+      if (this.readFailed) return;
       this.renderMergeMarkerActions();
       return;
     }
@@ -138,9 +144,15 @@ export class ConflictResolveModal extends Modal {
       } else {
         this.renderDiff(originalContent, conflictContent);
       }
-    } catch {
+    } catch (error) {
+      // V8: a read failure (sidecar already resolved, IO error, another
+      // window touching the vault) is not "binary content" — reporting it
+      // as such invited the user to click a destructive button on a file
+      // whose contents were never shown.
       if (!this.canRender(generation)) return;
-      this.renderBinaryNotice();
+      this.readFailed = true;
+      this.renderReadFailed(errorToMessage(error));
+      return;
     }
 
     if (!this.canRender(generation)) return;
@@ -172,9 +184,9 @@ export class ConflictResolveModal extends Modal {
       } else {
         this.renderMergeMarkerPreview(conflictContent);
       }
-    } catch {
+    } catch (error) {
       if (!this.canRender(generation)) return false;
-      this.renderBinaryNotice();
+      this.renderReadFailed(errorToMessage(error));
     }
     return true;
   }
@@ -214,6 +226,46 @@ export class ConflictResolveModal extends Modal {
     });
   }
 
+  /**
+   * V8: a read failure is not binary content. Render the real reason
+   * with a retry, and NO accept-style actions — the user must see the
+   * contents before deciding to keep or discard anything.
+   */
+  private renderReadFailed(reason: string): void {
+    this.contentEl.createDiv({
+      cls: "pkvsync-conflict-error",
+      text: format(this.labels.conflictReadFailed, { reason })
+    });
+    const actions = this.contentEl.createDiv({
+      cls: "pkvsync-conflict-actions"
+    });
+    const retry = actions.createEl("button", {
+      cls: "pkvsync-button is-primary",
+      text: this.labels.historyRetry
+    });
+    retry.addEventListener("click", () => {
+      this.contentEl.empty();
+      this.renderChrome();
+      void this.loadContent();
+    });
+    const dismiss = actions.createEl("button", {
+      cls: "pkvsync-button is-ghost",
+      text: this.labels.dismissConflictButton
+    });
+    dismiss.addEventListener("click", () => this.close());
+  }
+
+  private renderChrome(): void {
+    this.contentEl.createEl("h2", {
+      text: this.labels.conflictResolveTitle
+    });
+    const pathEl = this.contentEl.createDiv({
+      cls: "pkvsync-conflict-path",
+      text: this.pair.originalPath
+    });
+    pathEl.setAttr("title", this.pair.originalPath);
+  }
+
   private renderDiff(original: string, conflict: string): void {
     const container = this.contentEl.createDiv({
       cls: "pkvsync-conflict-diff"
@@ -222,16 +274,29 @@ export class ConflictResolveModal extends Modal {
     const table = container.createDiv({ cls: "pkvsync-diff-split" });
     table.setAttr("role", "table");
 
+    // V1: the columns describe WHERE each version lives, derived from
+    // the sidecar role — never a local/remote guess. In the common
+    // dirty-vs-remote shape the sidecar holds the LOCAL draft and the
+    // original path holds the remote; labeling the columns by role keeps
+    // "keep local" pointing at the user's edit in every producer shape.
+    const leftLabel =
+      this.pair.sidecarRole === "local"
+        ? this.labels.conflictDiskRemoteLabel
+        : this.labels.conflictDiskAbsentLabel;
+    const rightLabel =
+      this.pair.sidecarRole === "local"
+        ? this.labels.conflictSidecarLocalLabel
+        : this.labels.conflictSidecarRemoteLabel;
     const header = table.createDiv({ cls: "pkvsync-diff-split-header" });
     header.createDiv({ cls: "pkvsync-diff-line-no" });
     header.createDiv({
       cls: "pkvsync-diff-header-cell",
-      text: this.labels.acceptLocalButton
+      text: leftLabel
     });
     header.createDiv({ cls: "pkvsync-diff-line-no" });
     header.createDiv({
       cls: "pkvsync-diff-header-cell",
-      text: this.labels.acceptRemoteButton
+      text: rightLabel
     });
 
     const { rows, truncated } = lineDiffSideBySide(original, conflict);
@@ -294,6 +359,10 @@ export class ConflictResolveModal extends Modal {
       cls: "pkvsync-conflict-actions"
     });
 
+    // V1: action labels follow the sidecar role so the button promises
+    // what the action does in every producer shape. Keep-local on a
+    // local-role sidecar restores the user's draft; keep-local on a
+    // remote-role sidecar keeps the deletion.
     const localBtn = actions.createEl("button", {
       cls: "pkvsync-button is-primary",
       text: this.labels.acceptLocalButton
@@ -312,7 +381,6 @@ export class ConflictResolveModal extends Modal {
     });
     dismissBtn.addEventListener("click", () => this.close());
   }
-
   private renderMergeMarkerActions(): void {
     const actions = this.contentEl.createDiv({
       cls: "pkvsync-conflict-actions"

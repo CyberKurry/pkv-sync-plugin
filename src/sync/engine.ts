@@ -1,6 +1,6 @@
 import { Notice } from "obsidian";
 import { ApiError } from "../api/client";
-import { subscribeVaultEvents } from "../api/events-client";
+import { SseAuthError, subscribeVaultEvents } from "../api/events-client";
 import type { SyncApi } from "../api/sync-client";
 import type { VaultEvent } from "../api/types";
 import type { VaultSettings } from "../api/types";
@@ -91,7 +91,13 @@ export interface SyncEngineOptions {
     status: "connected" | "syncing" | "offline" | "error",
     detail?: string
   ): void;
-  labels?: Pick<Strings, "inlineApplyFailed" | "conflictNotice">;
+  labels?: Pick<
+    Strings,
+    | "inlineApplyFailed"
+    | "conflictNotice"
+    | "conflictCopyFailed"
+    | "sseAuthFailed"
+  >;
   onSyncSuccess?(): void | Promise<void>;
   vaultSettingsReader?: (vaultId: string) => Promise<VaultSettings>;
 }
@@ -247,6 +253,7 @@ export class SyncEngine {
             await this.syncNowInsideChainTask();
             return;
           }
+          if (!(await this.reconcileEventPosition(ev))) return;
           let needFallbackPull = false;
           for (const change of ev.changes) {
             try {
@@ -291,6 +298,18 @@ export class SyncEngine {
         }).catch(() => undefined);
       },
       onError: (err: Error) => {
+        if (err instanceof SseAuthError) {
+          // W5: the stream is stopped for good (revoked/expired token).
+          // The poll timer keeps the vault syncing, but realtime stays
+          // off until the credentials are fixed — say so instead of
+          // pretending reconnects will continue.
+          debugLog("[pkv-sync] SSE stream stopped (authentication):", err);
+          this.opts.setStatus(
+            "error",
+            (this.opts.labels ?? strings()).sseAuthFailed
+          );
+          return;
+        }
         debugLog("[pkv-sync] SSE event stream error; automatic reconnect will continue:", err);
       },
     });
@@ -600,6 +619,16 @@ export class SyncEngine {
     const pulledText = new Map<string, string>();
     const touched: LocalFileSnapshot[] = [];
     const deleted: string[] = [];
+    // Paths whose local deletion the server already rejected: the pull
+    // reports them as modified while no local file exists, meaning a
+    // delete-vs-modify verdict landed against us. They keep a .conflict-*
+    // sidecar of the remote content and MUST leave the index with the
+    // head advance — otherwise the next scanPendingFrom reclassifies the
+    // missing file as a fresh local delete and re-sends it, which the
+    // server's fast path (if_match == head) would then execute
+    // unconditionally, destroying the other device's committed edit
+    // vault-wide (S2).
+    const deleteRejected: string[] = [];
 
     try {
       for (const file of [...pull.added, ...pull.modified]) {
@@ -608,7 +637,20 @@ export class SyncEngine {
         const local = currentByPath.get(file.path);
         const indexed = index.files[file.path];
         if (isLocalDeleted(local, indexed?.lastSyncedHash)) {
-          await this.writeRemoteConflict(file, pull.to);
+          try {
+            await this.writeRemoteConflict(file, pull.to);
+          } catch (error) {
+            // W3: a sidecar the filesystem refuses (sidecar name longer
+            // than the path limit, read-only directory) must not wedge the
+            // vault at this commit forever. Nothing local is at stake here
+            // — the local file is already gone — and the remote content
+            // remains in the server history, so accept the verdict after
+            // telling the user. An abort is not a failure and must
+            // propagate.
+            if (error instanceof SyncAbortedError) throw error;
+            this.reportSidecarFailure(file.path, error);
+          }
+          deleteRejected.push(file.path);
           continue;
         }
 
@@ -687,6 +729,9 @@ export class SyncEngine {
     let appliedIndex: LocalIndex | null = null;
     const touchedSynced = touched.filter((file) => shouldSyncPath(file.path));
     const deletedApplied = deleted.filter((path) => shouldSyncPath(path) && pathAccepted(path));
+    const rejectedApplied = deleteRejected.filter(
+      (path) => shouldSyncPath(path) || shouldAcceptRemoteConflictPath(path)
+    );
     // Final index advance: the per-file loop's last await may have
     // straddled an abort (M-10) — a replaced generation must not move the
     // head the replacement engine is about to own.
@@ -694,6 +739,9 @@ export class SyncEngine {
     await this.opts.index.updateIndex((current) => {
       let next = markSynced(current, pull.to, touchedSynced);
       next = markDeleted(next, pull.to, deletedApplied);
+      // Server-rejected deletes drop their index entry under the same
+      // head advance: the verdict is accepted, not re-litigated.
+      next = markDeleted(next, next.lastSyncedCommit, rejectedApplied);
       appliedIndex = next;
       return next;
     });
@@ -755,18 +803,45 @@ export class SyncEngine {
     });
   }
 
+  /**
+   * Conflict sidecars already written in this engine generation, keyed by
+   * the conflict's content identity. A pull that fails on some other file
+   * is retried from the same base, so the conflict branch runs again; the
+   * timestamped sidecar name changes on every attempt, which used to stack
+   * an unbounded number of copies of the same content (W2). Reusing the
+   * copy while it still exists makes the retry idempotent; if the user
+   * resolved it (the file is gone) the next attempt writes a fresh one.
+   */
+  /**
+   * The index position a convergence sync reached in this generation, used
+   * to coalesce a burst of stale replayed events into one sync (R7R2-1).
+   * `null` = nothing converged yet; it is only compared against the current
+   * head, so any head change makes it stale and re-arms the sync.
+   */
+  private convergedHead: string | null = null;
+
+  private readonly writtenConflictSidecars = new Map<string, string>();
+
+  private sidecarAlreadyWritten(key: string): boolean {
+    const existing = this.writtenConflictSidecars.get(key);
+    return existing !== undefined && this.opts.vault.exists(existing);
+  }
+
   private async writeConflict(
     path: string,
     local: LocalFileSnapshot | undefined
   ): Promise<void> {
     if (!local) return;
     this.throwIfAborted();
+    const key = `${path}\u0000local\u0000${local.hash}`;
+    if (this.sidecarAlreadyWritten(key)) return;
     const cpath = conflictPath(path, this.opts.deviceName);
     if (local.kind === "text") {
       await this.opts.vault.writeText(cpath, local.content ?? "");
     } else if (local.bytes) {
       await this.opts.vault.writeBinary(cpath, local.bytes);
     }
+    this.writtenConflictSidecars.set(key, cpath);
     new Notice(
       format((this.opts.labels ?? strings()).conflictNotice, { path: cpath })
     );
@@ -774,6 +849,8 @@ export class SyncEngine {
 
   private async writeRemoteConflict(file: PullFile, atCommit: string): Promise<void> {
     this.throwIfAborted();
+    const key = `${file.path}\u0000remote\u0000${atCommit}`;
+    if (this.sidecarAlreadyWritten(key)) return;
     const cpath = conflictPath(file.path, "remote");
     if (file.file_type === "text") {
       const content =
@@ -792,9 +869,20 @@ export class SyncEngine {
       );
       await this.opts.vault.writeBinary(cpath, bytes);
     }
+    this.writtenConflictSidecars.set(key, cpath);
     new Notice(
       format((this.opts.labels ?? strings()).conflictNotice, { path: cpath })
     );
+  }
+
+  private reportSidecarFailure(path: string, error: unknown): void {
+    const message = format(
+      (this.opts.labels ?? strings()).conflictCopyFailed,
+      { path, reason: errorToMessage(error) }
+    );
+    debugLog("[pkv-sync] conflict sidecar could not be written:", error);
+    new Notice(message);
+    this.opts.setStatus("error", message);
   }
 
   private async applyInlineText(path: string, content: string, commit: string): Promise<void> {
@@ -891,6 +979,45 @@ export class SyncEngine {
       await this.opts.vault.trash(path);
       return markDeleted(index, commit, [path]);
     });
+  }
+
+  /**
+   * W1 + R7R2-1: decide whether an SSE event may be applied inline.
+   *
+   * `markSynced` records whatever commit it is handed — there is no
+   * monotonicity check — so an event older than the current index position
+   * (an SSE reconnect whose Last-Event-ID predates a poll that already
+   * synced past it) must not be applied: it would overwrite newer content
+   * with stale content and roll the head BACK.
+   *
+   * An event that does not extend the position exactly means the index is
+   * out of step with the stream (stale replay, or a missed event); the
+   * only safe move is a full sync, which converges either way. Because the
+   * server replays up to MAX_SSE_REPLAY_COMMITS events, that decision can
+   * fire once per replayed event; `convergedHead` remembers the position a
+   * convergence sync reached, so a burst of stale events costs ONE sync
+   * instead of one per event (each of which is a vault scan plus an HTTP
+   * pull).
+   *
+   * Returns true when the event extends the position and may be applied.
+   */
+  private async reconcileEventPosition(ev: VaultEvent): Promise<boolean> {
+    const index = await this.opts.index.loadIndex();
+    if (ev.commit === index.lastSyncedCommit) return false;
+    if (ev.parent !== index.lastSyncedCommit) {
+      if (
+        this.convergedHead !== null &&
+        this.convergedHead === index.lastSyncedCommit
+      ) {
+        return false;
+      }
+      await this.syncNowInsideChainTask();
+      // Read the position the pass reached; a failed pass throws before
+      // this line, so `convergedHead` only ever records a real convergence.
+      this.convergedHead = (await this.opts.index.loadIndex()).lastSyncedCommit;
+      return false;
+    }
+    return true;
   }
 
   private async advanceIndexHead(commit: string): Promise<void> {

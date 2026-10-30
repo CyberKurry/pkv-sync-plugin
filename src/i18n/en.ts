@@ -102,6 +102,8 @@ export const en = {
   inlineApplyFailed:
     "Failed to apply realtime update for {path}: {reason}. Falling back to full sync.",
   conflictNotice: "PKV Sync conflict: {path}",
+  conflictCopyFailed: "Could not write the conflict copy for {path}: {reason}",
+  sseAuthFailed: "Realtime sync stopped: the server rejected the token",
   connectedToServer: "Connected to {serverName}",
   changeServer: "Change server",
   loggedIn: "Logged in",
@@ -117,6 +119,8 @@ export const en = {
   vaultSyncAllowlistSaveButton: "Save",
   vaultSyncAllowlistSaved: "Saved .obsidian sync allowlist",
   vaultSyncAllowlistLoadFailed: "Failed to load .obsidian sync allowlist",
+  vaultSyncAllowlistNotLoaded: "Current allowlist not loaded yet — reload before saving",
+  vaultSyncAllowlistRetryButton: "Retry load",
   vaultSyncAllowlistSaveFailed: "Failed to save .obsidian sync allowlist",
   currentDeviceSuffix: " (current)",
   syncStatusTitle: "PKV Sync Status",
@@ -206,6 +210,10 @@ export const en = {
     "Auto-merge with conflicts (manual resolve needed)",
   acceptLocalButton: "Keep local",
   acceptRemoteButton: "Accept remote",
+  conflictDiskRemoteLabel: "On this device (remote version)",
+  conflictDiskAbsentLabel: "On this device (deleted here)",
+  conflictSidecarLocalLabel: "Conflict copy (your local edit)",
+  conflictSidecarRemoteLabel: "Conflict copy (remote version)",
   openInEditor: "Open in editor",
   markResolved: "Mark resolved",
   dismissConflictButton: "Later",
@@ -214,5 +222,7 @@ export const en = {
   conflictAcceptedRemoteNotice: "Accepted remote version, will push on next sync",
   markersStillPresent:
     "Conflict markers still present in file. Resolve them in your editor first.",
-  conflictResolveFailed: "Failed to resolve conflict"
+  conflictResolveFailed: "Failed to resolve conflict",
+  conflictReadFailed: "Could not read the conflict file: {reason}",
+  conflictsListLoadFailed: "Failed to load conflict files",
 };

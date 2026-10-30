@@ -12,7 +12,8 @@ import { notices } from "../mocks/obsidian";
 import { en } from "../../src/i18n/en";
 
 vi.mock("../../src/api/events-client", () => ({
-  subscribeVaultEvents: vi.fn()
+  subscribeVaultEvents: vi.fn(),
+  SseAuthError: class SseAuthError extends Error {}
 }));
 
 class FakeVault {
@@ -1286,10 +1287,17 @@ describe("SyncEngine pull", () => {
       pull: vi
         .fn()
         .mockRejectedValueOnce(new Error("server offline"))
+        // W1: the follow-up event does not extend the index position (the
+        // failed pass never advanced it), so the engine converges through
+        // a real pull rather than applying the newer event's changes
+        // alone — which would skip c1's content forever.
         .mockResolvedValue({
-          from: null,
-          to: null,
-          added: [],
+          from: "c0",
+          to: "c2",
+          added: [
+            { path: "first.md", file_type: "text", size: 5, content_inline: "first" },
+            { path: "second.md", file_type: "text", size: 6, content_inline: "second" }
+          ],
           modified: [],
           deleted: []
         }),
@@ -1352,6 +1360,10 @@ describe("SyncEngine pull", () => {
     await vi.waitFor(() => {
       expect(vault.writes.get("second.md")).toBe("second");
     });
+    // The point of the test: one failed fallback does not wedge the chain;
+    // the next event is still processed. W1 adds the other half — the
+    // skipped commit's content is recovered too, not silently dropped.
+    expect(vault.writes.get("first.md")).toBe("first");
     expect(idx.saved?.lastSyncedCommit).toBe("c2");
   });
 
@@ -1467,6 +1479,511 @@ describe("SyncEngine pull", () => {
     // Head advances to the merge commit
     expect(idx.saved?.lastSyncedCommit).toBe("c1");
     expect(idx.saved?.files["note.md"]?.lastSyncedHash).toBe(mergedHash);
+  });
+
+  it("does not resend a delete the server already rejected (S2 delete-vs-modify)", async () => {
+    // Sequence: A and B both synced a.md; B deleted it locally; before B's
+    // push landed, A edited and pushed. The server's auto-merge REJECTED
+    // B's delete (delete-vs-modify -> Conflict) and kept A's edit. B's
+    // backflow pull then reports a.md as modified while B has no local
+    // file — the isLocalDeleted branch writes a .conflict-* sidecar and
+    // must ACCEPT the server's verdict: the head advances and the path
+    // leaves the index so the NEXT pass does not classify it as a fresh
+    // local delete and re-send it (which the fast path would execute
+    // unconditionally, destroying A's committed edit vault-wide).
+    const cleanHash = await sha256Text("clean");
+    const remoteHash = await sha256Text("A's committed edit");
+    const idx = new FakeIndex({
+      lastSyncedCommit: "c0",
+      files: {
+        "a.md": {
+          lastSyncedHash: cleanHash,
+          lastSyncedAt: 1,
+          kind: "text",
+          size: 5
+        }
+      }
+    });
+    const vault = new FakeVault([]);
+    const pushes: Array<{ ifMatch: string | null; changes: unknown[] }> = [];
+    let pullCall = 0;
+    const api = {
+      state: vi.fn().mockResolvedValue({ current_head: "c1", changed_since: true }),
+      pull: vi.fn().mockImplementation(async () => {
+        pullCall += 1;
+        // First pull: covers (c0, c1] — the merge commit where the server
+        // rejected B's delete and kept A's edit.
+        if (pullCall === 1) {
+          return {
+            from: "c0",
+            to: "c1",
+            added: [],
+            modified: [
+              {
+                path: "a.md",
+                file_type: "text",
+                size: 19,
+                content_inline: "A's committed edit"
+              }
+            ],
+            deleted: []
+          };
+        }
+        return { from: "c1", to: "c1", added: [], modified: [], deleted: [] };
+      }),
+      uploadCheck: vi.fn().mockResolvedValue({ missing: [] }),
+      uploadBlob: vi.fn(),
+      push: vi.fn().mockImplementation(
+        async (_v: string, ifMatch: string | null, changes: unknown[]) => {
+          pushes.push({ ifMatch, changes });
+          // The real server answers B's stale delete with the auto-merge
+          // verdict: outcome "conflict" = delete REJECTED.
+          if (pushes.length === 1) {
+            return {
+              new_commit: "c1",
+              files_changed: 0,
+              merge_outcomes: [{ path: "a.md", outcome: "conflict" }]
+            };
+          }
+          return { new_commit: "c9", files_changed: changes.length };
+        }
+      ),
+      downloadBlob: vi.fn(),
+      downloadTextFile: vi.fn()
+    };
+    const engine = new SyncEngine({
+      vaultId: "v",
+      deviceName: "B-laptop",
+      textExtensions: new Set(["md"]),
+      vault: vault as unknown as SyncEngineOptions["vault"],
+      api: api as unknown as SyncEngineOptions["api"],
+      index: idx,
+      labels: en,
+      setStatus: vi.fn()
+    });
+
+    // First pass: B's delete went out with ifMatch=c0, the server
+    // auto-merged and REJECTED it; the pull reports a.md modified.
+    // Server verdict shape: the rejected delete keeps the index entry,
+    // the pull then hits the isLocalDeleted branch (no local file).
+    await engine.syncNow();
+    // Second pass: the verdict must hold — no delete for a.md again.
+    await engine.syncNow();
+
+    const resentDeletes = pushes.filter((push) =>
+      push.changes.some(
+        (change) => (change as { kind: string; path: string }).kind === "delete"
+      )
+    );
+    expect(resentDeletes).toHaveLength(1);
+    // The server's rejected-delete verdict leaves A's edit preserved as a
+    // remote sidecar on disk (writeRemoteConflict), and the head advanced
+    // past the verdict so the path cannot be reclassified as deleted.
+    const sidecar = [...vault.writes.keys()].find((path) =>
+      path.includes(".conflict-")
+    );
+    expect(sidecar).toBeDefined();
+    expect(vault.writes.get(sidecar!)).toBe("A's committed edit");
+    expect(idx.saved?.lastSyncedCommit).toBe("c1");
+  });
+
+  it("ignores a replayed commit older than the index position (W1)", async () => {
+    // SSE reconnect: the client resume position (Last-Event-ID) is older
+    // than the index because a poll already synced past it. The server
+    // replays the missed commits — whose content is STALE relative to
+    // what the poll applied. Applying them inline would overwrite the
+    // newer local content and roll lastSyncedCommit BACK (markSynced
+    // records whatever commit it is handed). Only an event that extends
+    // the index position exactly may be applied inline.
+    vi.mocked(subscribeVaultEvents).mockReturnValue(vi.fn());
+    const newHash = await sha256Text("newer content");
+    const idx = new FakeIndex({
+      lastSyncedCommit: "c5",
+      files: {
+        "note.md": {
+          lastSyncedHash: newHash,
+          lastSyncedAt: 1,
+          kind: "text",
+          size: 14
+        }
+      }
+    });
+    const vault = new FakeVault([
+      {
+        path: "note.md",
+        hash: newHash,
+        size: 14,
+        kind: "text",
+        content: "newer content"
+      }
+    ]);
+    const api = {
+      state: vi.fn().mockResolvedValue({ current_head: "c5", changed_since: false }),
+      pull: vi.fn().mockResolvedValue({
+        from: "c5",
+        to: "c5",
+        added: [],
+        modified: [],
+        deleted: []
+      }),
+      uploadCheck: vi.fn().mockResolvedValue({ missing: [] }),
+      uploadBlob: vi.fn(),
+      push: vi.fn(),
+      downloadBlob: vi.fn(),
+      downloadTextFile: vi.fn()
+    };
+    const engine = new SyncEngine({
+      vaultId: "v",
+      deviceName: "d",
+      textExtensions: new Set(["md"]),
+      vault: vault as unknown as SyncEngineOptions["vault"],
+      api: api as unknown as SyncEngineOptions["api"],
+      index: idx,
+      labels: en,
+      serverUrl: "https://sync.example.com",
+      deploymentKey: "k_abc",
+      token: "tok",
+      deviceId: "dev",
+      setStatus: vi.fn()
+    });
+
+    engine.startEventSubscription();
+    const options = vi.mocked(subscribeVaultEvents).mock.calls[0][0] as SubscribeOptions;
+    // Replayed C3 (child of C2), while the index already stands at C5.
+    options.onEvent({
+      kind: "commit",
+      commit: "c3",
+      parent: "c2",
+      source_device_id: "other",
+      at: 1_700_000_000,
+      changes: [
+        { kind: "text_inline", path: "note.md", content: "stale old content" }
+      ]
+    });
+
+    // Give the event chain a tick to run.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    // The stale content must never reach the vault, and the head must not
+    // move backwards.
+    expect(vault.writes.get("note.md")).toBeUndefined();
+    expect(idx.saved?.lastSyncedCommit).toBe("c5");
+    expect(idx.saved?.files["note.md"]?.lastSyncedHash).toBe(newHash);
+    // The guard routes the stale event into a conditional sync instead of
+    // applying it inline; the pull from c5 is that observable signal.
+    expect(api.pull).toHaveBeenCalled();
+  });
+
+  it("coalesces a burst of stale replayed events into one sync (R7R2-1)", async () => {
+    // A reconnect can replay up to MAX_SSE_REPLAY_COMMITS (64) events, all
+    // of them older than a position a poll already reached. Each stale
+    // event used to trigger its own full sync (vault scan + HTTP pull);
+    // the whole burst must cost exactly one.
+    vi.mocked(subscribeVaultEvents).mockReturnValue(vi.fn());
+    const hash = await sha256Text("current");
+    const idx = new FakeIndex({
+      lastSyncedCommit: "c5",
+      files: {
+        "note.md": {
+          lastSyncedHash: hash,
+          lastSyncedAt: 1,
+          kind: "text",
+          size: 7
+        }
+      }
+    });
+    const vault = new FakeVault([
+      { path: "note.md", hash, size: 7, kind: "text", content: "current" }
+    ]);
+    const api = {
+      state: vi.fn().mockResolvedValue({ current_head: "c5", changed_since: false }),
+      pull: vi.fn().mockResolvedValue({
+        from: "c5",
+        to: "c5",
+        added: [],
+        modified: [],
+        deleted: []
+      }),
+      uploadCheck: vi.fn().mockResolvedValue({ missing: [] }),
+      uploadBlob: vi.fn(),
+      push: vi.fn(),
+      downloadBlob: vi.fn(),
+      downloadTextFile: vi.fn()
+    };
+    const engine = new SyncEngine({
+      vaultId: "v",
+      deviceName: "d",
+      textExtensions: new Set(["md"]),
+      vault: vault as unknown as SyncEngineOptions["vault"],
+      api: api as unknown as SyncEngineOptions["api"],
+      index: idx,
+      labels: en,
+      serverUrl: "https://sync.example.com",
+      deploymentKey: "k_abc",
+      token: "tok",
+      deviceId: "dev",
+      setStatus: vi.fn()
+    });
+
+    engine.startEventSubscription();
+    const options = vi.mocked(subscribeVaultEvents).mock.calls[0][0] as SubscribeOptions;
+    for (const [commit, parent] of [["c2", "c1"], ["c3", "c2"], ["c4", "c3"]] as const) {
+      options.onEvent({
+        kind: "commit",
+        commit,
+        parent,
+        source_device_id: "other",
+        at: 1_700_000_000,
+        changes: [
+          { kind: "text_inline", path: "note.md", content: `stale ${commit}` }
+        ]
+      });
+    }
+
+    await vi.waitFor(() => expect(api.pull).toHaveBeenCalled());
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(api.pull).toHaveBeenCalledTimes(1);
+    expect(vault.writes.get("note.md")).toBeUndefined();
+    expect(idx.saved?.lastSyncedCommit).toBe("c5");
+  });
+
+  it("still applies a live event that extends the index position (W1)", async () => {
+    // Positive control: the guard must not block the healthy sequence —
+    // event C6 whose parent is the index position C5 applies inline.
+    vi.mocked(subscribeVaultEvents).mockReturnValue(vi.fn());
+    const oldHash = await sha256Text("old content");
+    const idx = new FakeIndex({
+      lastSyncedCommit: "c5",
+      files: {
+        "note.md": {
+          lastSyncedHash: oldHash,
+          lastSyncedAt: 1,
+          kind: "text",
+          size: 11
+        }
+      }
+    });
+    const vault = new FakeVault([
+      {
+        path: "note.md",
+        hash: oldHash,
+        size: 11,
+        kind: "text",
+        content: "old content"
+      }
+    ]);
+    const api = {
+      state: vi.fn(),
+      pull: vi.fn().mockResolvedValue({
+        from: "c6",
+        to: "c6",
+        added: [],
+        modified: [],
+        deleted: []
+      }),
+      uploadCheck: vi.fn().mockResolvedValue({ missing: [] }),
+      uploadBlob: vi.fn(),
+      push: vi.fn(),
+      downloadBlob: vi.fn(),
+      downloadTextFile: vi.fn()
+    };
+    const engine = new SyncEngine({
+      vaultId: "v",
+      deviceName: "d",
+      textExtensions: new Set(["md"]),
+      vault: vault as unknown as SyncEngineOptions["vault"],
+      api: api as unknown as SyncEngineOptions["api"],
+      index: idx,
+      labels: en,
+      serverUrl: "https://sync.example.com",
+      deploymentKey: "k_abc",
+      token: "tok",
+      deviceId: "dev",
+      setStatus: vi.fn()
+    });
+
+    engine.startEventSubscription();
+    const options = vi.mocked(subscribeVaultEvents).mock.calls[0][0] as SubscribeOptions;
+    options.onEvent({
+      kind: "commit",
+      commit: "c6",
+      parent: "c5",
+      source_device_id: "other",
+      at: 1_700_000_100,
+      changes: [
+        { kind: "text_inline", path: "note.md", content: "fresh content" }
+      ]
+    });
+
+    await vi.waitFor(() => {
+      expect(vault.writes.get("note.md")).toBe("fresh content");
+    });
+    expect(idx.saved?.lastSyncedCommit).toBe("c6");
+    expect(api.pull).not.toHaveBeenCalled();
+  });
+
+  it("does not stack a new conflict copy when a failing pull is retried (W2)", async () => {
+    // The pull fails on a poison file AFTER the conflict branch ran. The
+    // retry replays the same range, so the conflict branch runs again —
+    // with a wall clock several seconds later, i.e. a different timestamped
+    // sidecar name. Without dedupe every retry leaves another copy of the
+    // same content in the vault.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(new Date("2026-10-17T10:00:00Z"));
+      const oldHash = await sha256Text("gone");
+      const idx = new FakeIndex({
+        lastSyncedCommit: "c0",
+        files: {
+          "gone.md": {
+            lastSyncedHash: oldHash,
+            lastSyncedAt: 1,
+            kind: "text",
+            size: 4
+          }
+        }
+      });
+      // The user deleted gone.md locally.
+      const vault = new FakeVault([]);
+      const api = {
+        state: vi.fn().mockResolvedValue({ current_head: "c1", changed_since: true }),
+        pull: vi.fn().mockResolvedValue({
+          from: "c0",
+          to: "c1",
+          added: [],
+          modified: [
+            {
+              path: "gone.md",
+              file_type: "text",
+              size: 11,
+              content_inline: "remote edit"
+            },
+            {
+              path: "bad.png",
+              file_type: "blob",
+              size: 5,
+              blob_hash: "a".repeat(64)
+            }
+          ],
+          deleted: []
+        }),
+        uploadCheck: vi.fn().mockResolvedValue({ missing: [] }),
+        uploadBlob: vi.fn(),
+        // The server rejects the delete (delete-vs-modify), so the head
+        // stays at c0 and the pull below still runs.
+        push: vi.fn().mockResolvedValue({
+          new_commit: "c1",
+          files_changed: 0,
+          merge_outcomes: [{ path: "gone.md", outcome: "conflict" }]
+        }),
+        // Poison: the downloaded bytes never match the advertised hash, so
+        // every pull aborts at the same file.
+        downloadBlob: vi
+          .fn()
+          .mockResolvedValue(new TextEncoder().encode("wrong").buffer),
+        downloadTextFile: vi.fn()
+      };
+      const engine = new SyncEngine({
+        vaultId: "v",
+        deviceName: "d",
+        textExtensions: new Set(["md"]),
+        vault: vault as unknown as SyncEngineOptions["vault"],
+        api: api as unknown as SyncEngineOptions["api"],
+        index: idx,
+        labels: en,
+        setStatus: vi.fn()
+      });
+
+      await expect(engine.syncNow()).rejects.toThrow("Blob hash mismatch");
+      const afterFirst = [...vault.writes.keys()].filter((p) =>
+        p.includes(".conflict-")
+      );
+      expect(afterFirst).toHaveLength(1);
+
+      // Retry five seconds later: a fresh timestamp would produce a new
+      // sidecar name under the old behaviour.
+      vi.setSystemTime(new Date("2026-10-17T10:00:05Z"));
+      await expect(engine.syncNow()).rejects.toThrow("Blob hash mismatch");
+      const afterRetry = [...vault.writes.keys()].filter((p) =>
+        p.includes(".conflict-")
+      );
+      expect(afterRetry).toEqual(afterFirst);
+      // Fail-closed: the poison file keeps the head where it was.
+      expect(idx.saved?.lastSyncedCommit ?? "c0").toBe("c0");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("accepts the verdict when the conflict copy cannot be written (W3)", async () => {
+    // A sidecar path the filesystem refuses (path length, read-only dir)
+    // used to fail the whole pull every time, so the head never advanced
+    // and the vault stopped syncing with no way out.
+    const oldHash = await sha256Text("gone");
+    const idx = new FakeIndex({
+      lastSyncedCommit: "c0",
+      files: {
+        "gone.md": {
+          lastSyncedHash: oldHash,
+          lastSyncedAt: 1,
+          kind: "text",
+          size: 4
+        }
+      }
+    });
+    const vault = new FakeVault([]);
+    vi.spyOn(vault, "writeText").mockImplementation(async (path) => {
+      if (path.includes(".conflict-")) throw new Error("ENAMETOOLONG");
+    });
+    const api = {
+      state: vi.fn().mockResolvedValue({ current_head: "c1", changed_since: true }),
+      pull: vi.fn().mockResolvedValue({
+        from: "c0",
+        to: "c1",
+        added: [],
+        modified: [
+          {
+            path: "gone.md",
+            file_type: "text",
+            size: 11,
+            content_inline: "remote edit"
+          }
+        ],
+        deleted: []
+      }),
+      uploadCheck: vi.fn().mockResolvedValue({ missing: [] }),
+      uploadBlob: vi.fn(),
+      push: vi.fn().mockResolvedValue({
+        new_commit: "c1",
+        files_changed: 0,
+        merge_outcomes: [{ path: "gone.md", outcome: "conflict" }]
+      }),
+      downloadBlob: vi.fn(),
+      downloadTextFile: vi.fn()
+    };
+    const setStatus = vi.fn();
+    const engine = new SyncEngine({
+      vaultId: "v",
+      deviceName: "d",
+      textExtensions: new Set(["md"]),
+      vault: vault as unknown as SyncEngineOptions["vault"],
+      api: api as unknown as SyncEngineOptions["api"],
+      index: idx,
+      labels: en,
+      setStatus
+    });
+
+    await engine.syncNow();
+
+    // The verdict was accepted: head advanced, the path left the index,
+    // and the failure was surfaced to the user.
+    expect(idx.saved?.lastSyncedCommit).toBe("c1");
+    expect(idx.saved?.files["gone.md"]).toBeUndefined();
+    expect(
+      notices.some((n) => n.includes("Could not write the conflict copy"))
+    ).toBe(true);
+    expect(setStatus).toHaveBeenCalledWith("error", expect.any(String));
   });
 
   it("SSE inline apply on clean file applies directly without push", async () => {
