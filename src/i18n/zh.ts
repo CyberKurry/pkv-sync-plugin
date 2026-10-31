@@ -88,6 +88,17 @@ export const zh = {
   migrateStageUploadingBlobs: "正在上传二进制文件",
   migrateStagePushing: "正在推送文件",
   migrateStageComplete: "迁移完成",
+  migrateStageCommitting: "正在保存迁移状态，此步骤不可取消。",
+  migrateScopeChanged: "连接或所选 vault 已改变，迁移已停止。",
+  migrateSaveFailed: "迁移状态保存失败，已恢复原选择。",
+  migrateRecoveryFailed:
+    "迁移状态恢复失败，同步已暂停。请检查存储并重新加载插件。",
+  migrateEngineFailed: "迁移状态已保存，但同步引擎未能恢复。",
+  localStateSaveFailed: "本地设置保存失败，已恢复原状态。原因：{reason}",
+  localStateRecoveryFailed:
+    "本地状态恢复失败，同步已暂停。请检查存储并重新加载插件。原因：{reason}",
+  localStateApplyFailed:
+    "本地设置已保存，但应用失败，同步已暂停。请重新加载插件。原因：{reason}",
   migrateProgressSummary:
     "{processed}/{total} 个文件 - 批次 {batch}/{batches} - 二进制 {blobs}/{totalBlobs}",
   migrateCompleteSummary: "已迁移 {count} 个文件 - 已跳过 {skipped} 个",
@@ -100,6 +111,13 @@ export const zh = {
   noticeNotConfigured: "PKV Sync 未配置。",
   noticeSyncNotReady: "PKV Sync 尚未就绪。请先选择一个笔记库。",
   noticeSyncComplete: "PKV Sync 同步完成",
+  pushInlineTooLarge:
+    "无法同步 {path}：序列化请求为 {bytes} 字节，超过服务端 {limit} 字节的内联上限。",
+  pushProxyTooLarge:
+    "无法同步 {path}：单文件请求（{bytes} 字节）仍被服务端或代理判定为过大。",
+  pushRetryLater: "服务端暂时拒绝本次推送，将在 {seconds} 秒后重试。",
+  pushSplitBudgetExceeded:
+    "已发生 {count} 次请求超限，推送已停止。请检查服务端或代理限制。",
   inlineApplyFailed: "无法应用 {path} 的实时更新：{reason}。将回退到完整同步。",
   conflictNotice: "PKV Sync 冲突：{path}",
   conflictCopyFailed: "无法为 {path} 写入冲突副本：{reason}",

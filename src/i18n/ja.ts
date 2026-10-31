@@ -89,6 +89,18 @@ export const ja = {
   migrateStageUploadingBlobs: "blob をアップロード中",
   migrateStagePushing: "ファイルを push 中",
   migrateStageComplete: "移行完了",
+  migrateStageCommitting: "移行状態を保存しています。この手順はキャンセルできません。",
+  migrateScopeChanged: "接続または選択した Vault が変更されたため、移行を停止しました。",
+  migrateSaveFailed: "移行状態を保存できませんでした。以前の選択に戻しました。",
+  migrateRecoveryFailed:
+    "移行状態を復元できませんでした。同期は停止しています。ストレージを確認してプラグインを再読み込みしてください。",
+  migrateEngineFailed: "移行状態は保存されましたが、同期エンジンを再起動できませんでした。",
+  localStateSaveFailed:
+    "ローカル設定を保存できませんでした。以前の状態に戻しました。原因：{reason}",
+  localStateRecoveryFailed:
+    "ローカル状態を復元できませんでした。同期は停止しています。ストレージを確認してプラグインを再読み込みしてください。原因：{reason}",
+  localStateApplyFailed:
+    "ローカル設定は保存されましたが、適用に失敗しました。同期は停止しています。プラグインを再読み込みしてください。原因：{reason}",
   migrateProgressSummary:
     "{processed}/{total} ファイル - バッチ {batch}/{batches} - blob {blobs}/{totalBlobs}",
   migrateCompleteSummary: "{count} ファイルを移行 - {skipped} 件をスキップ",
@@ -101,6 +113,13 @@ export const ja = {
   noticeNotConfigured: "PKV Sync は未設定です。",
   noticeSyncNotReady: "PKV Sync は準備ができていません。先に Vault を選択してください。",
   noticeSyncComplete: "PKV Sync が完了しました",
+  pushInlineTooLarge:
+    "{path} を同期できません: シリアライズされたリクエストは {bytes} バイトで、サーバーのインライン上限 {limit} バイトを超えています。",
+  pushProxyTooLarge:
+    "{path} を同期できません: 単一ファイルのリクエスト（{bytes} バイト）もサーバーまたはプロキシによって大きすぎると判定されました。",
+  pushRetryLater: "サーバーがこのプッシュを一時的に拒否しました。{seconds} 秒後に再試行します。",
+  pushSplitBudgetExceeded:
+    "リクエスト超過が {count} 回発生したため、プッシュを停止しました。サーバーまたはプロキシの制限を確認してください。",
   inlineApplyFailed:
     "{path} のリアルタイム更新を適用できませんでした: {reason}。完全同期にフォールバックします。",
   conflictNotice: "PKV Sync の競合: {path}",

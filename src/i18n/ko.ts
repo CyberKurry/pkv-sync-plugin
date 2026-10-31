@@ -97,6 +97,18 @@ export const ko = {
   migrateStageUploadingBlobs: "blob 업로드 중",
   migrateStagePushing: "파일 push 중",
   migrateStageComplete: "마이그레이션 완료",
+  migrateStageCommitting: "마이그레이션 상태를 저장하는 중입니다. 이 단계는 취소할 수 없습니다.",
+  migrateScopeChanged: "연결 또는 선택한 vault가 변경되어 마이그레이션을 중지했습니다.",
+  migrateSaveFailed: "마이그레이션 상태를 저장하지 못했습니다. 이전 선택을 복원했습니다.",
+  migrateRecoveryFailed:
+    "마이그레이션 상태를 복원하지 못했습니다. 동기화가 일시 중지되었습니다. 저장 공간을 확인하고 플러그인을 다시 로드하세요.",
+  migrateEngineFailed: "마이그레이션 상태는 저장되었지만 동기화 엔진을 다시 시작하지 못했습니다.",
+  localStateSaveFailed:
+    "로컬 설정을 저장하지 못했습니다. 이전 상태를 복원했습니다. 원인: {reason}",
+  localStateRecoveryFailed:
+    "로컬 상태를 복원하지 못했습니다. 동기화가 일시 중지되었습니다. 저장 공간을 확인하고 플러그인을 다시 로드하세요. 원인: {reason}",
+  localStateApplyFailed:
+    "로컬 설정은 저장되었지만 적용하지 못했습니다. 동기화가 일시 중지되었습니다. 플러그인을 다시 로드하세요. 원인: {reason}",
   migrateProgressSummary:
     "{processed}/{total}개 파일 - 배치 {batch}/{batches} - blob {blobs}/{totalBlobs}",
   migrateCompleteSummary: "{count}개 파일 마이그레이션됨 - {skipped}개 건너뜀",
@@ -109,6 +121,13 @@ export const ko = {
   noticeNotConfigured: "PKV Sync가 설정되지 않았습니다.",
   noticeSyncNotReady: "PKV Sync 준비가 되지 않았습니다. 먼저 vault를 선택하세요.",
   noticeSyncComplete: "PKV Sync 완료",
+  pushInlineTooLarge:
+    "{path}을(를) 동기화할 수 없습니다: 직렬화된 요청이 {bytes}바이트로 서버의 인라인 한도 {limit}바이트를 초과합니다.",
+  pushProxyTooLarge:
+    "{path}을(를) 동기화할 수 없습니다: 단일 파일 요청({bytes}바이트)도 서버 또는 프록시에서 너무 크다고 거부되었습니다.",
+  pushRetryLater: "서버가 이 푸시를 일시적으로 거부했습니다. {seconds}초 후에 다시 시도합니다.",
+  pushSplitBudgetExceeded:
+    "요청 초과가 {count}회 발생하여 푸시를 중지했습니다. 서버 또는 프록시 한도를 확인하세요.",
   inlineApplyFailed:
     "{path}의 실시간 업데이트를 적용하지 못했습니다: {reason}. 전체 동기화로 전환합니다.",
   conflictNotice: "PKV Sync 충돌: {path}",

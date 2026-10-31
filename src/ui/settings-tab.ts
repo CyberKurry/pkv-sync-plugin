@@ -8,6 +8,8 @@ import {
   type SettingDefinitionRender
 } from "obsidian";
 import { ApiError } from "../api/client";
+import type { ConnectionStamp } from "../connection-context";
+import { DataCommitError } from "../plugin-store";
 import type {
   MeResponse,
   ServerConfigResponse,
@@ -26,6 +28,7 @@ import {
 } from "../settings";
 import { listConflictFiles } from "../sync/conflict-files";
 import { DeleteVaultModal } from "./delete-vault-modal";
+import { localStateErrorMessage } from "./local-state-error";
 import {
   formatDetailedUnixSeconds,
   formatRelativeUnixSeconds,
@@ -177,7 +180,9 @@ export class PKVSyncSettingTab extends PluginSettingTab {
       placeholder: "https://sync.example.com/k_xxx/",
       value: this.plugin.settings.serverUrl,
       onInput: (value) => {
-        this.plugin.settings.serverUrl = value.trim();
+        void this.plugin
+          .setConnectionPatch({ serverUrl: value.trim() })
+          .catch((error: unknown) => new Notice(errorToMessage(error)));
       },
       onCommit: async () => this.plugin.saveSettings({ rebuild: false })
     });
@@ -185,7 +190,9 @@ export class PKVSyncSettingTab extends PluginSettingTab {
       placeholder: "k_xxx",
       value: this.plugin.settings.deploymentKey,
       onInput: (value) => {
-        this.plugin.settings.deploymentKey = value.trim();
+        void this.plugin
+          .setConnectionPatch({ deploymentKey: value.trim() })
+          .catch((error: unknown) => new Notice(errorToMessage(error)));
       },
       onCommit: async () => this.plugin.saveSettings({ rebuild: false })
     });
@@ -209,21 +216,32 @@ export class PKVSyncSettingTab extends PluginSettingTab {
 
     this.renderUpdates(panel);
     this.renderButton(panel, t.connect, "primary", async () => {
+      let stamp: ConnectionStamp | null = null;
       try {
         const parsed = parseServerUrl(serverUrl.value, deploymentKey.value);
-        this.plugin.settings.serverUrl = parsed.serverUrl;
-        this.plugin.settings.deploymentKey = parsed.deploymentKey;
-        await this.plugin.saveSettings({ rebuild: false });
-        this.cfg = await this.plugin.api().config();
-        this.plugin.settings.textExtensions = normalizeTextExtensions(
-          this.cfg.supported_text_extensions
-        );
-        await this.plugin.saveSettings({ rebuild: false });
+        stamp = await this.plugin.setConnectionPatch({
+          serverUrl: parsed.serverUrl,
+          deploymentKey: parsed.deploymentKey
+        });
+        if (!stamp) return;
+        // allowRebuild=false: resumeSyncForCurrentScope owns the single
+        // rebuild, so an accepted config does not start two engines.
+        const cfg = await this.plugin.refreshServerCapabilities(false, { throwOnFailure: true });
+        if (!cfg || !this.plugin.isConnectionCurrent(stamp)) return;
+        this.cfg = cfg;
+        await this.plugin.resumeSyncForCurrentScope(stamp);
+        if (!this.plugin.isConnectionCurrent(stamp)) return;
         new Notice(
           format(t.connectedToServer, { serverName: this.serverHost() })
         );
         this.refresh();
       } catch (error) {
+        if (stamp && !this.plugin.isConnectionCurrent(stamp)) return;
+        if (error instanceof DataCommitError) {
+          // Failures that pause sync are reported inside the publication gate.
+          if (error.state === "restored") new Notice(localStateErrorMessage(error, t));
+          return;
+        }
         if (error instanceof ApiError && error.code === "setup_required") {
           new Notice(t.setupRequiredNotice);
           return;
@@ -339,19 +357,26 @@ export class PKVSyncSettingTab extends PluginSettingTab {
 
   private async login(username: string, password: string): Promise<void> {
     try {
+      const stamp = await this.plugin.captureConnection();
       const response = await this.plugin
-        .api()
+        .apiForConnection(stamp)
         .login(
           username,
           password,
           this.plugin.settings.deviceId,
           this.plugin.settings.deviceName
         );
-      this.plugin.settings.token = response.token;
-      this.plugin.settings.userId = response.user_id;
-      this.plugin.settings.username = response.username;
-      await this.plugin.saveSettings();
+      const accepted = await this.plugin.setConnectionPatch(
+        {
+          token: response.token,
+          userId: response.user_id,
+          username: response.username
+        },
+        stamp
+      );
+      if (!accepted) return;
       new Notice(this.plugin.text().loggedIn);
+      await this.plugin.resumeSyncForCurrentScope(accepted);
       this.refresh();
     } catch (error) {
       new Notice(errorToMessage(error));
@@ -364,8 +389,9 @@ export class PKVSyncSettingTab extends PluginSettingTab {
     inviteCode: string
   ): Promise<void> {
     try {
+      const stamp = await this.plugin.captureConnection();
       const response = await this.plugin
-        .api()
+        .apiForConnection(stamp)
         .register(
           username,
           password,
@@ -373,11 +399,17 @@ export class PKVSyncSettingTab extends PluginSettingTab {
           this.plugin.settings.deviceName,
           inviteCode || undefined
         );
-      this.plugin.settings.token = response.token;
-      this.plugin.settings.userId = response.user_id;
-      this.plugin.settings.username = response.username;
-      await this.plugin.saveSettings();
+      const accepted = await this.plugin.setConnectionPatch(
+        {
+          token: response.token,
+          userId: response.user_id,
+          username: response.username
+        },
+        stamp
+      );
+      if (!accepted) return;
       new Notice(this.plugin.text().registeredAndLoggedIn);
+      await this.plugin.resumeSyncForCurrentScope(accepted);
       this.refresh();
     } catch (error) {
       new Notice(errorToMessage(error));
@@ -466,10 +498,13 @@ export class PKVSyncSettingTab extends PluginSettingTab {
         selected ? t.selectedVaultButton : t.useVaultButton,
         selected ? "primary" : "ghost",
         async () => {
-          this.plugin.settings.selectedVaultId = vault.id;
-          this.plugin.settings.selectedVaultName = vault.name;
-          await this.plugin.saveSettings();
+          const accepted = await this.plugin.setSelectedVault(
+            vault.id,
+            vault.name
+          );
+          if (!accepted) return;
           new Notice(format(t.selectedVaultNotice, { name: vault.name }));
+          await this.plugin.resumeSyncForCurrentScope();
           this.refresh();
         }
       );
@@ -679,11 +714,9 @@ export class PKVSyncSettingTab extends PluginSettingTab {
   async deleteVaultAndRefresh(vault: VaultSummary): Promise<void> {
     await this.plugin.api().deleteVault(vault.id);
     if (this.plugin.settings.selectedVaultId === vault.id) {
-      this.plugin.settings.selectedVaultId = "";
-      this.plugin.settings.selectedVaultName = "";
+      await this.plugin.setSelectedVault("", "");
       this.plugin.invalidateSyncEngine();
     }
-    await this.plugin.saveSettings();
     new Notice(
       format(this.plugin.text().deletedVaultNotice, { name: vault.name })
     );
@@ -705,10 +738,13 @@ export class PKVSyncSettingTab extends PluginSettingTab {
       }
       try {
         const vault = await this.plugin.api().createVault(vaultName);
-        this.plugin.settings.selectedVaultId = vault.id;
-        this.plugin.settings.selectedVaultName = vault.name;
-        await this.plugin.saveSettings();
+        const accepted = await this.plugin.setSelectedVault(
+          vault.id,
+          vault.name
+        );
+        if (!accepted) return;
         new Notice(format(t.createdVaultNotice, { name: vault.name }));
+        await this.plugin.resumeSyncForCurrentScope();
         this.refresh();
       } catch (error) {
         new Notice(`${t.createVaultFailed}: ${errorToMessage(error)}`);
@@ -950,15 +986,17 @@ export class PKVSyncSettingTab extends PluginSettingTab {
   }
 
   private async logout(): Promise<void> {
+    const stamp = await this.plugin.captureConnection();
     try {
-      await this.plugin.api().logout();
+      await this.plugin.apiForConnection(stamp).logout();
     } catch {
       // Token may already be invalid server-side.
     }
-    this.plugin.settings.token = "";
-    this.plugin.settings.username = "";
-    this.plugin.settings.userId = "";
-    await this.plugin.saveSettings();
+    const accepted = await this.plugin.setConnectionPatch(
+      { token: "", username: "", userId: "" },
+      stamp
+    );
+    if (!accepted) return;
     this.refresh();
   }
 

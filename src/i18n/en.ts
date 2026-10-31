@@ -87,6 +87,21 @@ export const en = {
   migrateStageUploadingBlobs: "Uploading blobs",
   migrateStagePushing: "Pushing files",
   migrateStageComplete: "Migration complete",
+  migrateStageCommitting: "Saving migration state. This step cannot be cancelled.",
+  migrateScopeChanged:
+    "Migration stopped because the connection or selected vault changed.",
+  migrateSaveFailed:
+    "Migration state could not be saved. The previous selection was restored.",
+  migrateRecoveryFailed:
+    "Migration state could not be restored. Sync is paused. Check storage and reload the plugin.",
+  migrateEngineFailed:
+    "Migration state was saved, but the sync engine could not be restarted.",
+  localStateSaveFailed:
+    "Could not save local settings. The previous state was restored. Reason: {reason}",
+  localStateRecoveryFailed:
+    "Local state could not be restored. Sync is paused. Check storage and reload the plugin. Reason: {reason}",
+  localStateApplyFailed:
+    "Local settings were saved, but applying them failed. Sync is paused. Reload the plugin. Reason: {reason}",
   migrateProgressSummary:
     "{processed}/{total} files - batch {batch}/{batches} - blobs {blobs}/{totalBlobs}",
   migrateCompleteSummary: "{count} files migrated - {skipped} skipped",
@@ -99,6 +114,13 @@ export const en = {
   noticeNotConfigured: "PKV Sync is not configured.",
   noticeSyncNotReady: "PKV Sync is not ready. Select a vault first.",
   noticeSyncComplete: "PKV Sync complete",
+  pushInlineTooLarge:
+    "Cannot sync {path}: the serialized request is {bytes} bytes, above the server's {limit}-byte inline limit.",
+  pushProxyTooLarge:
+    "Cannot sync {path}: even its single-file request ({bytes} bytes) was rejected as too large by the server or proxy.",
+  pushRetryLater: "The server temporarily rejected this push. Retry in {seconds}s.",
+  pushSplitBudgetExceeded:
+    "Push stopped after {count} oversized-request failures. Check the server or proxy limit.",
   inlineApplyFailed:
     "Failed to apply realtime update for {path}: {reason}. Falling back to full sync.",
   conflictNotice: "PKV Sync conflict: {path}",

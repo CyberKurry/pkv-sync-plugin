@@ -88,6 +88,17 @@ export const zhHant = {
   migrateStageUploadingBlobs: "正在上傳二進位檔案",
   migrateStagePushing: "正在推送檔案",
   migrateStageComplete: "遷移完成",
+  migrateStageCommitting: "正在儲存遷移狀態，此步驟無法取消。",
+  migrateScopeChanged: "連線或所選 vault 已變更，遷移已停止。",
+  migrateSaveFailed: "遷移狀態儲存失敗，已還原原來的選擇。",
+  migrateRecoveryFailed:
+    "遷移狀態還原失敗，同步已暫停。請檢查儲存空間並重新載入外掛。",
+  migrateEngineFailed: "遷移狀態已儲存，但同步引擎未能恢復。",
+  localStateSaveFailed: "本機設定儲存失敗，已還原原來的狀態。原因：{reason}",
+  localStateRecoveryFailed:
+    "本機狀態還原失敗，同步已暫停。請檢查儲存空間並重新載入外掛。原因：{reason}",
+  localStateApplyFailed:
+    "本機設定已儲存，但套用失敗，同步已暫停。請重新載入外掛。原因：{reason}",
   migrateProgressSummary:
     "{processed}/{total} 個檔案 - 批次 {batch}/{batches} - 二進位 {blobs}/{totalBlobs}",
   migrateCompleteSummary: "已遷移 {count} 個檔案 - 已略過 {skipped} 個",
@@ -100,6 +111,13 @@ export const zhHant = {
   noticeNotConfigured: "PKV Sync 未設定。",
   noticeSyncNotReady: "PKV Sync 尚未就緒。請先選擇一個筆記庫。",
   noticeSyncComplete: "PKV Sync 同步完成",
+  pushInlineTooLarge:
+    "無法同步 {path}：序列化請求為 {bytes} 位元組，超過伺服端 {limit} 位元組的內嵌上限。",
+  pushProxyTooLarge:
+    "無法同步 {path}：單一檔案請求（{bytes} 位元組）仍被伺服端或代理判定為過大。",
+  pushRetryLater: "伺服端暫時拒絕本次推送，將於 {seconds} 秒後重試。",
+  pushSplitBudgetExceeded:
+    "已發生 {count} 次請求超限，推送已停止。請檢查伺服端或代理限制。",
   inlineApplyFailed: "無法套用 {path} 的即時更新：{reason}。將回退到完整同步。",
   conflictNotice: "PKV Sync 衝突：{path}",
   conflictCopyFailed: "無法為 {path} 寫入衝突副本：{reason}",
