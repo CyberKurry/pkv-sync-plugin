@@ -9,7 +9,7 @@ import { format, strings, type Strings } from "../i18n";
 import { createPathMatcher } from "./exclude";
 import { conflictPath } from "./conflict";
 import { sha256Bytes, sha256Text, sha256TextWithLength } from "./hash";
-import { guessMime } from "./mime";
+
 import { pushItemFingerprint, snapshotToPushChange } from "./push-prepare";
 import {
   markBatch,
@@ -18,7 +18,6 @@ import {
   markFilesSynced,
   markSynced
 } from "./index-store";
-import type { PushChange } from "./types";
 import type { LocalFileSnapshot, LocalIndex, PullFile, PullResponse, PushResponse } from "./types";
 import {
   PushBatcher,
@@ -35,7 +34,9 @@ import {
 } from "./vault-adapter";
 
 const BLOB_UPLOAD_CONCURRENCY = 4;
-const MAX_PUSH_CHANGES = 1000;
+// R9-Dup-6: derive from LEGACY_PUSH_LIMITS — the server's own 1000
+// (service/sync/limits.rs) is the wire contract and stays independent.
+const MAX_PUSH_CHANGES = LEGACY_PUSH_LIMITS.max_changes;
 
 interface PendingScan {
   pending: LocalFileSnapshot[];
@@ -195,7 +196,15 @@ export class SyncEngine {
 
   async syncNow(options: { retryOversized?: boolean } = {}): Promise<void> {
     if (options.retryOversized) this.oversizedProbeRequested = true;
-    if (this.activeSync) return this.activeSync;
+    if (this.activeSync) {
+      // R8-5: the user's explicit "try again" must not be deferred behind
+      // a coalesced pass that already consumed the entry probe (it is
+      // past beginRun). Poke the batcher so the in-flight run retries the
+      // cooled files from its next chunk on; the deferredUntil gate is
+      // cleared too, matching what a fresh retry pass would do.
+      if (options.retryOversized) this.pushBatcher.requestMidRunRetry();
+      return this.activeSync;
+    }
     // M-12: the pass runs as a chain task, so it both (a) waits for any
     // event handler that is mid-apply — the chain-runner equivalent of
     // "chain busy": the pass cannot start until the running task's
@@ -384,8 +393,16 @@ export class SyncEngine {
         pending.push(file);
       }
     }
+    // R11-2: the deletion filter must consult the SAME rule the scan
+    // listing applies (shouldSyncPath). The scan already dropped
+    // escaped-separator paths (the server's R10-1 twin), so an index
+    // entry for one reads as "missing from the scan" here — classifying
+    // it as a local delete would emit a delete for a file the user
+    // still has (the data-loss direction R9-7's ruling forbids). A path
+    // the sync plan refuses on both sides is neither pending nor
+    // deleted; it simply stays out of the conversation.
     const deleted = Object.keys(index.files).filter(
-      (p) => !currentPaths.has(p) && pathAccepted(p)
+      (p) => !currentPaths.has(p) && pathAccepted(p) && shouldSyncPath(p)
     );
     return { pending, deleted, index };
   }

@@ -1,5 +1,6 @@
 import { Notice } from "obsidian";
 import { SyncApi } from "./api/sync-client";
+import { format } from "./i18n";
 import { syncScopeKey } from "./plugin-data";
 import { isLoggedIn } from "./settings";
 import { Debouncer } from "./sync/debounce";
@@ -114,9 +115,48 @@ export class SyncOrchestrator {
    * the status element already shows the failure, so the rejection must be
    * consumed here — otherwise every timer tick while offline produced an
    * unhandled promise rejection.
+   *
+   * R9-7: a pass that fails on the SAME error twice in a row (e.g. one
+   * permanently unreadable local file makes every scheduled pass fail)
+   * also gets one Notice, not one per tick — without this the vault
+   * silently stopped syncing with only a red status bar and no pointer
+   * at the blocking file.
    */
   private kickSync(): void {
-    void this.plugin.engine?.syncNow().catch(() => undefined);
+    void this.plugin.engine?.syncNow().then(
+      () => {
+        // R11-3: "keeps failing" must mean CONSECUTIVE failures. A success
+        // in between clears the streak, so fail→succeed→fail with the
+        // same message is not "repeatedly failing" and gets no notice.
+        this.lastSyncErrorMessage = null;
+        this.repeatedSyncErrorCount = 0;
+      },
+      (error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        if (message === this.lastSyncErrorMessage) {
+          this.repeatedSyncErrorCount += 1;
+        } else {
+          this.lastSyncErrorMessage = message;
+          this.repeatedSyncErrorCount = 1;
+        }
+        if (this.repeatedSyncErrorCount === 2) {
+          new Notice(
+            format(this.plugin.text().syncRepeatedlyFailing, {
+              reason: message
+            })
+          );
+        }
+      }
+    );
+  }
+
+  private lastSyncErrorMessage: string | null = null;
+  private repeatedSyncErrorCount = 0;
+
+  /** R11-3: a manual sync shares the streak state — success clears it. */
+  private clearSyncErrorStreak(): void {
+    this.lastSyncErrorMessage = null;
+    this.repeatedSyncErrorCount = 0;
   }
 
   invalidate(): void {
@@ -144,6 +184,9 @@ export class SyncOrchestrator {
       // A manual sync is the user's explicit "try again": it clears the
       // learned oversize cooldowns, but never bypasses the local hard limit.
       await this.plugin.engine.syncNow({ retryOversized: true });
+      // R11-3: the streak counter spans both pass sources (timer and
+      // manual); a manual success clears it like a timer success does.
+      this.clearSyncErrorStreak();
       new Notice(t.noticeSyncComplete);
     } catch (error) {
       new Notice(errorToMessage(error));

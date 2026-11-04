@@ -171,7 +171,13 @@ export class UpdateCheckService {
       stylesCssUrl: manifest.styles_css_url ?? null,
       stylesCssSha256: manifest.styles_css_sha256 ?? null
     };
-    return this.isTrustedServerUpdate(update) ? update : null;
+    // R9-4: a NEWER version that cannot be served verifiably is a broken
+    // update source, not "no update" — folding it into null made the check
+    // report "up to date" forever while the server shipped a bad manifest
+    // (off-origin asset urls, missing digests). Same ruling as R8-2 for
+    // the GitHub source: only "not newer" answers null.
+    this.assertTrustedServerUpdate(update);
+    return update;
   }
 
   private async fetchGitHubManifest(): Promise<PluginUpdateStatus | null> {
@@ -185,7 +191,17 @@ export class UpdateCheckService {
         throw: false
       })
     );
-    if (response.status < 200 || response.status >= 300) return null;
+    if (response.status === 404) return null;
+    if (response.status < 200 || response.status >= 300) {
+      // R8-2: an HTTP failure is a failed check, not "no update". 403 is
+      // GitHub's unauthenticated rate limit (60 req/h per IP — realistic
+      // behind NAT); 5xx and repo-moved 404-shaped redirect failures are
+      // transient or configuration errors. Folding them into null made
+      // the check report "up to date" while a newer release may exist.
+      throw new Error(
+        `GitHub release check failed for ${this.githubRepo}: HTTP ${response.status}`
+      );
+    }
 
     const release = JSON.parse(response.text) as GitHubRelease;
     const version = normalizeStableVersion(release.tag_name);
@@ -252,16 +268,33 @@ export class UpdateCheckService {
     return text;
   }
 
-  private isTrustedServerUpdate(update: PluginUpdateStatus): boolean {
-    if (!isSha256Hex(update.mainJsSha256)) return false;
-    if (!isSha256Hex(update.manifestJsonSha256)) return false;
-    if (this.serverPath(update.mainJsUrl) === null) return false;
-    if (this.serverPath(update.manifestJsonUrl) === null) return false;
-    if (update.stylesCssUrl !== null) {
-      if (!isSha256Hex(update.stylesCssSha256)) return false;
-      if (this.serverPath(update.stylesCssUrl) === null) return false;
+  private assertTrustedServerUpdate(update: PluginUpdateStatus): void {
+    if (!isSha256Hex(update.mainJsSha256)) {
+      throw new Error("server plugin manifest lacks a valid main_js_sha256 digest");
     }
-    return true;
+    if (!isSha256Hex(update.manifestJsonSha256)) {
+      throw new Error("server plugin manifest lacks a valid manifest_json_sha256 digest");
+    }
+    if (this.serverPath(update.mainJsUrl) === null) {
+      throw new Error(
+        `server plugin manifest points main.js off-origin: ${update.mainJsUrl}`
+      );
+    }
+    if (this.serverPath(update.manifestJsonUrl) === null) {
+      throw new Error(
+        `server plugin manifest points manifest.json off-origin: ${update.manifestJsonUrl}`
+      );
+    }
+    if (update.stylesCssUrl !== null) {
+      if (!isSha256Hex(update.stylesCssSha256)) {
+        throw new Error("server plugin manifest lacks a valid styles_css_sha256 digest");
+      }
+      if (this.serverPath(update.stylesCssUrl) === null) {
+        throw new Error(
+          `server plugin manifest points styles.css off-origin: ${update.stylesCssUrl}`
+        );
+      }
+    }
   }
 
   private assertServerUpdateAssetsSameOrigin(update: PluginUpdateStatus): void {

@@ -253,6 +253,39 @@ describe("plugin update check", () => {
     await expect(service().checkOnce("github")).rejects.toThrow(/sha256/);
   });
 
+  it("returns null for a 404 (repo has no releases) but throws on other HTTP failures", async () => {
+    // R8-2: 403 (unauthenticated rate limit — 60 req/h/IP, realistic behind
+    // NAT) and 5xx used to fold into null → "up to date" while a newer
+    // release may exist. 404 stays null: it means the repo genuinely has
+    // no release, which IS "no update".
+    requestUrlMock.mockResolvedValueOnce({
+      status: 404,
+      headers: {},
+      text: "not found",
+      arrayBuffer: new ArrayBuffer(0),
+      json: null
+    });
+    await expect(service().checkOnce("github")).resolves.toBeNull();
+
+    requestUrlMock.mockResolvedValueOnce({
+      status: 403,
+      headers: {},
+      text: "rate limited",
+      arrayBuffer: new ArrayBuffer(0),
+      json: null
+    });
+    await expect(service().checkOnce("github")).rejects.toThrow(/403/);
+
+    requestUrlMock.mockResolvedValueOnce({
+      status: 502,
+      headers: {},
+      text: "bad gateway",
+      arrayBuffer: new ArrayBuffer(0),
+      json: null
+    });
+    await expect(service().checkOnce("github")).rejects.toThrow(/502/);
+  });
+
   it("rejects sha256 mismatches before writing plugin files", async () => {
     const adapter = new MemoryAdapter();
     requestUrlMock.mockResolvedValueOnce(responseText("changed main"));
@@ -301,7 +334,11 @@ describe("plugin update check", () => {
     expect(adapter.writes).toEqual([]);
   });
 
-  it("ignores server manifests that point plugin assets off-origin", async () => {
+  it("surfaces a manifest-shape error for server manifests that point plugin assets off-origin", async () => {
+    // R9-4: a NEWER version whose assets cannot be served verifiably is
+    // a broken update source, not "no update". Folding it into null made
+    // the check report "up to date" forever while the server shipped a
+    // bad manifest — the same defect R8-2 fixed for the GitHub source.
     requestUrlMock.mockResolvedValueOnce(
       responseJson({
         version: "0.8.1",
@@ -314,10 +351,50 @@ describe("plugin update check", () => {
       })
     );
 
+    await expect(service().checkOnce("server")).rejects.toThrow(
+      /off-origin|same origin/i
+    );
+    expect(requestUrlMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("surfaces a manifest-shape error when the server manifest omits asset digests", async () => {
+    // manifest_json_sha256 is optional in the server payload schema; a
+    // third-party server that skips it cannot serve a verifiable update.
+    requestUrlMock.mockResolvedValueOnce(
+      responseJson({
+        version: "0.8.1",
+        main_js_url: "https://sync.example.com/api/plugin-assets/main.js",
+        main_js_sha256: "a".repeat(64),
+        manifest_json_url: "https://sync.example.com/api/plugin-assets/manifest.json",
+        manifest_json_sha256: null,
+        styles_css_url: null,
+        styles_css_sha256: null
+      })
+    );
+
+    await expect(service().checkOnce("server")).rejects.toThrow(
+      /manifest_json_sha256|digest/i
+    );
+    expect(requestUrlMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("still returns null when the server manifest is not newer", async () => {
+    // "No update" (version not newer) stays null; only broken shapes throw.
+    requestUrlMock.mockResolvedValueOnce(
+      responseJson({
+        version: "0.8.0",
+        main_js_url: "https://sync.example.com/api/plugin-assets/main.js",
+        main_js_sha256: "a".repeat(64),
+        manifest_json_url: "https://sync.example.com/api/plugin-assets/manifest.json",
+        manifest_json_sha256: "b".repeat(64),
+        styles_css_url: null,
+        styles_css_sha256: null
+      })
+    );
+
     const update = await service().checkOnce("server");
 
     expect(update).toBeNull();
-    expect(requestUrlMock).toHaveBeenCalledTimes(1);
   });
 
   it("rejects server-source updates with off-origin plugin asset urls", async () => {

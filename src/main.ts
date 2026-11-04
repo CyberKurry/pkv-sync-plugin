@@ -82,7 +82,7 @@ import {
   type PluginFileAdapter,
   type PluginUpdateStatus
 } from "./services/update-check";
-import { errorToMessage, extensionOf } from "./util";
+import { errorToMessage, isTextPath } from "./util";
 
 type CompletionState = "old_safe" | "new_committed" | "disk_uncertain";
 
@@ -150,6 +150,22 @@ export default class PKVSyncPlugin extends Plugin {
       userId: this.settings.userId,
       username: this.settings.username
     };
+  }
+
+  /**
+   * The committed connection identity — what the auth store must persist.
+   *
+   * Drafts (stageConnectionDraft) mutate this.settings in place, so
+   * persisting auth straight from settings would write half-typed
+   * connection values into the auth store — the ONLY persistence layer
+   * for connection fields, and the source loadSettings() restores from on
+   * the next launch (R8-1). The committed identity lives in the
+   * connection context, which only setConnectionPatch replaces; every
+   * auth persist therefore reads it instead of the drafted settings.
+   */
+  private committedIdentity(): ConnectionIdentity {
+    const committed = this.connectionContextInstance?.snapshotLocked().connection;
+    return committed ?? this.currentIdentity();
   }
 
   async onload(): Promise<void> {
@@ -223,7 +239,19 @@ export default class PKVSyncPlugin extends Plugin {
   }
 
   async saveSettings(options: { rebuild?: boolean } = {}): Promise<void> {
-    await this.connectionContext.runLocal(() => this.persistSettingsLocked());
+    // R8-4: a settings-write failure (disk full, permissions) used to
+    // escape as an unhandled rejection from every `void saveSettings()`
+    // call site — memory settings already changed, disk not written, no
+    // notice. Surface it through the localized notice so the user knows
+    // the change did not persist.
+    try {
+      await this.connectionContext.runLocal(() => this.persistSettingsLocked());
+    } catch (error) {
+      new Notice(
+        format(this.text().settingsSaveFailed, { reason: errorToMessage(error) })
+      );
+      throw error;
+    }
     // W7: a rebuild-forbidden save (the migration path) must also forbid
     // the mirror's own rebuild.
     void this.refreshServerCapabilities(options.rebuild !== false);
@@ -272,10 +300,12 @@ export default class PKVSyncPlugin extends Plugin {
    * left the vault with no engine, no timers, a persisted half-typed URL
    * and no recovery path until the next explicit connect (R7R3-1).
    *
-   * Drafts are memory-only and transient: the engine keeps running on the
-   * identity it was built with, and the value only becomes real through an
-   * explicit commit — the field's change/blur event or the Connect button,
-   * both of which call setConnectionPatch.
+   * Drafts are memory-only for the persisted identity: the engine keeps
+   * running on the identity it was built with, and a drafted value only
+   * becomes real through an explicit commit — the Connect button, which
+   * calls setConnectionPatch (the single path that persists connection
+   * fields, via persistAuth's committedIdentity). The field's
+   * change/blur event persists non-connection settings only.
    */
   stageConnectionDraft(patch: Partial<ConnectionIdentity>): void {
     Object.assign(this.settings, patch);
@@ -348,15 +378,48 @@ export default class PKVSyncPlugin extends Plugin {
   }
 
   private persistAuth(): void {
-    this.authStore.save(authFromSettings(this.settings));
+    // R8-1: persist the COMMITTED identity, never the drafted settings —
+    // a half-typed deployment key must not permanently replace k_xxx in
+    // the store loadSettings() restores from.
+    const committed = this.committedIdentity();
+    this.authStore.save(
+      authFromSettings({
+        deviceId: this.settings.deviceId,
+        serverUrl: committed.serverUrl,
+        deploymentKey: committed.deploymentKey,
+        token: committed.token,
+        userId: committed.userId
+      })
+    );
   }
 
   private async saveSettingsPatch(
     patch: Partial<PKVSyncSettings>,
-    options: { rebuild?: boolean } = {}
+    options: { rebuild?: boolean; notice?: boolean } = {}
   ): Promise<void> {
     Object.assign(this.settings, patch);
-    await this.dataStore.update((data) => writePluginSettingsPatch(data, patch));
+    // R9-5: this is the second settings-write producer (lastSyncSuccessAt,
+    // lastUpdateCheckAt). It used to call dataStore.update directly: a
+    // disk write failure escaped into whichever caller happened to await
+    // it - recordSyncSuccess turned a SUCCESSFUL sync pass into an error
+    // status, checkForPluginUpdates reported "update check failed" - and
+    // no notice ever named the real problem. Same contract as saveSettings
+    // (R8-4): localized notice + rethrow, fenced by the connection lock.
+    try {
+      await this.connectionContext.runLocal(() =>
+        this.dataStore.update((data) => writePluginSettingsPatch(data, patch))
+      );
+    } catch (error) {
+      new Notice(
+        format(this.text().settingsSaveFailed, { reason: errorToMessage(error) })
+      );
+      if (options.notice === false) {
+        // Non-critical bookkeeping (timestamp remembers): report but do
+        // not fail the caller's outcome - the sync pass itself succeeded.
+        return;
+      }
+      throw error;
+    }
     this.updateStatus();
     if (options.rebuild !== false) this.rebuildSyncEngine();
   }
@@ -412,15 +475,6 @@ export default class PKVSyncPlugin extends Plugin {
     return this.dataStore.read((data) => readSyncIndex(data, scopeKey));
   }
 
-  async saveSyncIndex(
-    index: LocalIndex,
-    scopeKey = syncScopeKey(this.settings)
-  ): Promise<void> {
-    await this.dataStore.update((data) =>
-      writePluginSettingsWithoutAuth(writeSyncIndex(data, scopeKey, index), this.settings)
-    );
-  }
-
   /**
    * Atomic read-modify-write of the sync index. The updater runs inside the
    * SerializedPluginDataStore.update transaction, so concurrent callers
@@ -471,9 +525,12 @@ export default class PKVSyncPlugin extends Plugin {
 
   async recordSyncSuccess(generation: number): Promise<void> {
     if (generation !== this.syncGeneration) return;
+    // R9-5: bookkeeping write — a failure must not rewrite a successful
+    // pass into an error status (engine awaits this right after setting
+    // "connected"). The notice still fires; the pass result stands.
     await this.saveSettingsPatch(
       { lastSyncSuccessAt: Math.floor(Date.now() / 1000) },
-      { rebuild: false }
+      { rebuild: false, notice: false }
     );
   }
 
@@ -656,6 +713,9 @@ export default class PKVSyncPlugin extends Plugin {
 
   private rebuildSyncEngine(): void {
     if (this.persistenceRecoveryRequired) return;
+    // R8-3: a rebuild replaces the engine (and its generation guard);
+    // the remembered engine status belongs to the old engine.
+    this.statusEl?.clearEngineStatus();
     this.orchestrator.rebuild();
   }
 
@@ -705,7 +765,8 @@ export default class PKVSyncPlugin extends Plugin {
         this.app,
         this.text(),
         onResolved,
-        pairsProvider
+        pairsProvider,
+        this.settings.textExtensions
       ).open();
     };
     openList();
@@ -728,7 +789,8 @@ export default class PKVSyncPlugin extends Plugin {
             this.text(),
             () => {
               this.pushDebouncer?.trigger();
-            }
+            },
+            this.settings.textExtensions
           ).open();
           return;
         }
@@ -1022,8 +1084,7 @@ export default class PKVSyncPlugin extends Plugin {
   }
 
   private isBinaryPath(path: string): boolean {
-    const ext = extensionOf(path);
-    return !ext || !this.settings.textExtensions.includes(ext);
+    return !isTextPath(path, new Set(this.settings.textExtensions));
   }
 
   private commitLine(entry: CommitSummary): string {
@@ -1234,6 +1295,8 @@ export default class PKVSyncPlugin extends Plugin {
   }
 
   invalidateSyncEngine(): void {
+    // R8-3: the engine's remembered status dies with the engine.
+    this.statusEl?.clearEngineStatus();
     this.orchestrator.invalidate();
   }
 
