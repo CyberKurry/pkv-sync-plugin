@@ -225,6 +225,7 @@ function normalizeVaultPath(path: string): string | null {
   if (hasEscapedPathSeparator(normalized)) return null;
   if (hasUnsafeDecodedShape(normalized)) return null;
   if (hasProtectedRoot(normalized)) return null;
+  if (hasWindowsUnsafeComponent(normalized)) return null;
   return normalized;
 }
 
@@ -277,7 +278,17 @@ function hasUnsafeDecodedShape(path: string): boolean {
       }
       return false;
     }
-    if (decoded === current) return false;
+    if (decoded === current) {
+      // R14-M1: fixed point reached. The server stores every pushed path
+      // at its fixed-point decode (decode_to_fixed_point, the idempotent
+      // contract), so a literal whose fixed point differs from itself
+      // (`a%41.md` → `aA.md`) maps onto a DIFFERENT server path than the
+      // local key: a sibling with the decoded spelling collapses onto the
+      // same server file with independent index keys — silent mutual
+      // overwrite, no conflict sidecar — and the pull re-delivers the
+      // file under the decoded name. Refuse to sync it at all.
+      return current !== path;
+    }
     current = normalizeSeparators(decoded);
     if (hasEscapedPathSeparator(current)) return true;
     if (!isSafePathShape(current) || hasProtectedRoot(current) || startsWithDotRoot(current)) {
@@ -300,4 +311,28 @@ function hasProtectedSegment(path: string): boolean {
 
 function startsWithDotRoot(path: string): boolean {
   return path.split("/", 1)[0].startsWith(".");
+}
+
+/**
+ * R14-M3: mirror of the server's `is_windows_unsafe_component`
+ * (server/src/storage/path.rs). The server refuses DOS device names
+ * (with or without an extension), components containing a colon and
+ * trailing dots/spaces on EVERY platform — a Windows client joining
+ * later could not materialize them. Without this prefilter the plugin
+ * pushes such files into a deterministic 400 invalid_path on every
+ * pass, wedging the whole vault's push stream.
+ */
+const WINDOWS_RESERVED_NAMES = new Set([
+  "CON", "PRN", "AUX", "NUL",
+  "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+  "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"
+]);
+
+function hasWindowsUnsafeComponent(path: string): boolean {
+  return path.split("/").some((part) => {
+    if (part.includes(":")) return true;
+    if (part.endsWith(".") || part.endsWith(" ")) return true;
+    const stem = part.split(".", 1)[0];
+    return WINDOWS_RESERVED_NAMES.has(stem.toUpperCase());
+  });
 }
