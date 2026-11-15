@@ -114,6 +114,8 @@ export const ko = {
   migrateProgressSummary:
     "{processed}/{total}개 파일 - 배치 {batch}/{batches} - blob {blobs}/{totalBlobs}",
   migrateCompleteSummary: "{count}개 파일 마이그레이션됨 - {skipped}개 건너뜀",
+  migrateCompleteRefused:
+    "{count}개 파일을 마이그레이션하지 못해 새 vault에 포함되지 않았습니다: {paths}",
   migrateFailed: "마이그레이션 실패",
   migrateCompleteNotice: "{count}개 파일을 「{name}」(으)로 마이그레이션했습니다",
   viewSyncStatusCommand: "동기화 상태 상세 보기",
@@ -127,6 +129,10 @@ export const ko = {
     "{path}을(를) 동기화할 수 없습니다: 직렬화된 요청이 {bytes}바이트로 서버의 인라인 한도 {limit}바이트를 초과합니다.",
   pushProxyTooLarge:
     "{path}을(를) 동기화할 수 없습니다: 단일 파일 요청({bytes}바이트)도 서버 또는 프록시에서 너무 크다고 거부되었습니다.",
+  pushPathsRefusedSummary:
+    "{count}개 파일을 동기화할 수 없어 이 기기에만 남습니다.",
+  pushPathRejected:
+    "{path}을(를) 동기화할 수 없습니다: 서버가 이 경로를 거부했습니다({reason}). 이름을 바꾸거나 편집할 때까지 이 기기에만 남습니다.",
   pushRetryLater: "서버가 이 푸시를 일시적으로 거부했습니다. {seconds}초 후에 다시 시도합니다.",
   pushSplitBudgetExceeded:
     "요청 초과가 {count}회 발생하여 푸시를 중지했습니다. 서버 또는 프록시 한도를 확인하세요.",
@@ -135,7 +141,17 @@ export const ko = {
   conflictNotice: "PKV Sync 충돌: {path}",
   conflictCopyFailed: "{path}의 충돌 사본을 작성하지 못했습니다: {reason}",
   sseAuthFailed: "실시간 동기화가 중지되었습니다: 서버가 토큰을 거부했습니다",
+  emptyScanHeld: "볼트 스캔에서 파일을 찾지 못해 삭제를 보류함",
+  confirmEmptySyncCommand: "빈 볼트 삭제를 확인하고 동기화",
+  emptyScanConfirmTitle: "볼트 전체 삭제 확인",
+  emptyScanConfirmBody:
+    "최근 스캔에서 파일이 0개인데 동기화 인덱스에는 {count}개 항목이 남아 있습니다. 이는 보통 모두 삭제했다는 뜻이 아니라 저장소를 사용할 수 없음(권한 회수, 디스크 미마운트)을 의미합니다. 확인하면 이 삭제를 모든 기기에 동기화합니다.",
+  emptyScanConfirmAccept: "그래도 삭제 동기화",
+  modalCancel: "취소",
   connectedToServer: "「{serverName}」에 연결되었습니다",
+  connectConfirmTitle: "서버에 연결",
+  connectConfirmBody:
+    "PKV Sync를 {server}에 연결할까요? 링크의 서버 주소와 배포 키를 저장합니다. 로그인은 여전히 본인 계정으로 합니다.",
   changeServer: "서버 변경",
   loggedIn: "로그인됨",
   registeredAndLoggedIn: "회원가입 후 로그인되었습니다",
@@ -180,6 +196,9 @@ export const ko = {
   defaultIosDevice: "iOS 기기",
   defaultDesktopDevice: "데스크톱",
   enableHistoryUi: "기록 및 차이 비교 UI 사용",
+  pruneEmptyFolders: "원격 삭제로 비어진 폴더 정리",
+  firstPruneNotice:
+    "PKV Sync가 빈 폴더 {path}를 정리했습니다(설정에서 끌 수 있음)",
   showFileHistoryCommand: "파일 기록 보기",
   showVaultHistoryCommand: "Vault 기록 보기",
   fileHistoryMenu: "PKV Sync: 파일 기록",

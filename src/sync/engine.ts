@@ -42,6 +42,8 @@ interface PendingScan {
   pending: LocalFileSnapshot[];
   deleted: string[];
   index: LocalIndex;
+  /** D3: the breaker held every local deletion this pass (spec §3.4). */
+  emptyScanHeld?: boolean;
 }
 
 export interface IndexPersistence {
@@ -107,6 +109,9 @@ export interface SyncEngineOptions {
     | "conflictNotice"
     | "conflictCopyFailed"
     | "sseAuthFailed"
+    | "pushPathRejected"
+    | "pushPathsRefusedSummary"
+    | "emptyScanHeld"
   >;
   onSyncSuccess?(): void | Promise<void>;
   vaultSettingsReader?: (vaultId: string) => Promise<VaultSettings>;
@@ -155,6 +160,40 @@ export class SyncEngine {
    */
   private pushBatcherInstance: PushBatcher | null = null;
   private oversizedProbeRequested = false;
+  /**
+   * D3 breaker escape hatch (spec §3.4): set by the explicit "confirm
+   * empty-vault deletions" command. Consumed by the NEXT sync pass only —
+   * a held pass must never stay overrideable forever by accident.
+   *
+   * R15-7: "the next pass" has to mean a pass that starts AFTER the
+   * confirmation, not the pass that happens to run next. A confirmation
+   * clicked while a pass is in flight coalesced onto that pass, which was
+   * already past the consumption point, so the armed flag outlived the pass
+   * it was meant for and was lifted by some later, unrelated one — a
+   * whole-vault deletion the user never confirmed for that moment. What
+   * makes the two distinguishable is `emptyScanConfirmCoalesced` right
+   * below: a click that lands on an in-flight pass records itself there,
+   * and `syncNow`'s completion hook runs the pass it actually asked for.
+   */
+  private emptyScanOverride = false;
+  /**
+   * R15-7: a confirmation clicked WHILE a pass is in flight cannot be
+   * honoured by that pass — it is long past the consumption point — so
+   * something has to run a pass that starts after it. `emptyScanConfirmCoalesced`
+   * records that the click landed on an in-flight pass; `syncNow`'s
+   * completion hook sees it and runs one more pass, which is the pass the
+   * user's click actually asked for.
+   */
+  private emptyScanConfirmCoalesced = false;
+  /**
+   * The override value lifted for the pass currently in flight: every
+   * scanPendingFrom classification inside one pass — including the 409
+   * head-mismatch retry's trailing reclassification — shares it, so a
+   * confirmed pass cannot be split into an override half and a held half.
+   */
+  private passOverride = false;
+  /** Deletions held by the breaker on the most recent completed classification. */
+  private lastHeldDeletionCount = 0;
 
   constructor(private opts: SyncEngineOptions) {
     if (!opts.vaultId.trim()) throw new Error("SyncEngine requires a non-empty vaultId");
@@ -183,6 +222,33 @@ export class SyncEngine {
   /** Cancel any in-flight sync pass and future event handling (M-10). */
   abort(): void {
     this.abortController.abort();
+  }
+
+  /** Arm the D3 escape hatch (spec §3.4) for the next sync pass. */
+  allowEmptyScanDeletesOnce(): void {
+    this.emptyScanOverride = true;
+    // R15-7: if a pass is already in flight, it has passed the consumption
+    // point and cannot honour this click. Note it so the completion hook
+    // schedules the pass the click actually asked for; otherwise the flag
+    // would survive into whatever unrelated pass ran next.
+    if (this.activeSync) this.emptyScanConfirmCoalesced = true;
+  }
+
+  /**
+   * Deletions held by the breaker on the most recent completed
+   * classification (0 when none).
+   */
+  heldDeletionCount(): number {
+    return this.lastHeldDeletionCount;
+  }
+
+  /**
+   * R15-7: whether a "confirm empty-vault deletions" click is still waiting
+   * for a pass to actually start. Observable so the completion hook's
+   * follow-up pass can be asserted instead of inferred from timing.
+   */
+  emptyScanConfirmPending(): boolean {
+    return this.emptyScanOverride || this.emptyScanConfirmCoalesced;
   }
 
   private get aborted(): boolean {
@@ -219,14 +285,38 @@ export class SyncEngine {
     const completion = run.then(
       () => {
         if (this.activeSync === completion) this.activeSync = null;
+        this.runDeferredEmptyScanConfirm();
       },
       (error) => {
         if (this.activeSync === completion) this.activeSync = null;
+        this.runDeferredEmptyScanConfirm();
         throw error;
       }
     );
     this.activeSync = completion;
     return completion;
+  }
+
+  /**
+   * R15-7: honour a "confirm empty-vault deletions" click that arrived while
+   * a pass was in flight.
+   *
+   * The click could not be consumed by the running pass (it had already
+   * lifted the override), so it is still armed. The pass the user asked for
+   * has to start now — otherwise the flag survives into whatever unrelated
+   * pass happens to run next, which is a whole-vault deletion nobody
+   * confirmed for that moment. Deliberately fire-and-forget: the click's own
+   * caller (`void plugin.syncNowManual()`) has already returned, and the
+   * completion of this pass must not be delayed by the next one.
+   */
+  private runDeferredEmptyScanConfirm(): void {
+    if (!this.emptyScanConfirmCoalesced) return;
+    this.emptyScanConfirmCoalesced = false;
+    // An aborted/replaced generation owns neither the vault nor the status
+    // element any more; the replacement engine's own sync covers it.
+    if (this.aborted) return;
+    if (!this.emptyScanOverride) return;
+    void this.syncNow().catch(() => undefined);
   }
 
   /**
@@ -302,14 +392,25 @@ export class SyncEngine {
           }
           if (!(await this.reconcileEventPosition(ev))) return;
           let needFallbackPull = false;
+          // R15-6: the local exclusion rules are a promise about THIS
+          // device's disk, so every surface that writes the disk must
+          // honour them — not only the pull. The SSE loop called the apply
+          // helpers directly, so a vault whose local excludes are narrower
+          // than the server's (`.obsidian/plugins/**` kept out of sync on
+          // purpose) had those files trashed by a remote delete: a local
+          // exclusion silently overridden by the realtime stream. One rule,
+          // one predicate: the pull's shouldApplyPulledPath.
+          const pathAccepted = this.currentPathMatcher();
           for (const change of ev.changes) {
             try {
               switch (change.kind) {
                 case "text_inline":
-                  await this.applyInlineText(change.path, change.content, ev.commit);
+                  if (!this.shouldApplyPulledPath(change.path, pathAccepted)) break;
+                  await this.applyInlineText(change.path, change.content);
                   break;
                 case "delete":
-                  await this.applyDelete(change.path, ev.commit);
+                  if (!this.shouldApplyPulledPath(change.path, pathAccepted)) break;
+                  await this.applyDelete(change.path);
                   break;
                 case "text_ref":
                 case "blob":
@@ -367,11 +468,7 @@ export class SyncEngine {
     this.unsubscribeEvents = null;
   }
 
-  async scanPending(): Promise<{
-    pending: LocalFileSnapshot[];
-    deleted: string[];
-    index: LocalIndex;
-  }> {
+  async scanPending(): Promise<PendingScan> {
     const index = await this.opts.index.loadIndex();
     const current = await this.opts.vault.scan(this.opts.textExtensions, index, {
       retainPayload: false
@@ -404,6 +501,25 @@ export class SyncEngine {
     const deleted = Object.keys(index.files).filter(
       (p) => !currentPaths.has(p) && pathAccepted(p) && shouldSyncPath(p)
     );
+    // D3 (spec §3.4): a scan that lists ZERO files against a populated
+    // index means "the vault looks empty", not "the user deleted
+    // everything" — cold-start cache, revoked storage permission, an
+    // unmounted drive. Pushing would broadcast a whole-vault deletion
+    // (verified: this exact shape pushes N delete changes today). Hold
+    // every deletion; the explicit confirm command is the only way through.
+    const vaultScannedEmpty = current.length === 0;
+    const indexHasEntries = Object.keys(index.files).length > 0;
+    if (
+      vaultScannedEmpty &&
+      indexHasEntries &&
+      // nothing classifiable as a deletion: holding would only pin an error status
+      deleted.length > 0 &&
+      !this.passOverride
+    ) {
+      this.lastHeldDeletionCount = deleted.length;
+      return { pending, deleted: [], index, emptyScanHeld: true };
+    }
+    this.lastHeldDeletionCount = 0;
     return { pending, deleted, index };
   }
 
@@ -429,10 +545,18 @@ export class SyncEngine {
     try {
       this.throwIfAborted();
       this.opts.setStatus("syncing");
+      // D3: lift the armed confirm into a pass-scoped value BEFORE the
+      // first classification runs, so every scanPendingFrom call in this
+      // pass (the 409 head-mismatch retry's reclassification included)
+      // honors the same decision instead of re-holding halfway through.
+      //
+      this.passOverride = this.emptyScanOverride;
+      this.emptyScanOverride = false;
       await this.refreshVaultSettings();
 
       // ① scan BEFORE any pull
       const scan = await this.scanPending();
+      const emptyScanHeld = scan.emptyScanHeld === true;
       this.throwIfAborted();
 
       // ② push-first: send pending changes before pulling
@@ -441,15 +565,34 @@ export class SyncEngine {
         () => this.throwIfAborted(),
         this.consumeOversizedProbe()
       );
-      await this.pushPendingWithHeadMismatchRetry(scan, run);
+      const refused = await this.pushPendingWithHeadMismatchRetry(scan, run);
       this.throwIfAborted();
 
       // ③ pull backflow: merged content arrives as a normal pull
       await this.pullIfChanged();
 
       this.throwIfAborted();
-      this.opts.setStatus("connected");
-      await this.opts.onSyncSuccess?.();
+      if (emptyScanHeld) {
+        // A held pass is not a successful sync: keep the warning visible
+        // and do not refresh "last synced" (spec §3.4).
+        this.opts.setStatus("error", (this.opts.labels ?? strings()).emptyScanHeld);
+      } else if (refused.size > 0) {
+        // R16-H1: the pass moved everything it could, but some files were
+        // refused and remain on this device only. Claiming a clean sync
+        // here would advance lastSyncSuccessAt and paint the status bar
+        // green over a vault that is quietly incomplete; the per-path
+        // Notice already named them, so this keeps the summary honest
+        // without repeating the list.
+        this.opts.setStatus(
+          "error",
+          format((this.opts.labels ?? strings()).pushPathsRefusedSummary, {
+            count: refused.size
+          })
+        );
+      } else {
+        this.opts.setStatus("connected");
+        await this.opts.onSyncSuccess?.();
+      }
     } catch (error) {
       if (error instanceof SyncAbortedError) {
         // Expected cancellation (generation replaced). No status change:
@@ -465,6 +608,10 @@ export class SyncEngine {
         );
       }
       throw error;
+    } finally {
+      // An aborted/replaced pass must not leak its pass-scoped override
+      // into a later pass of this engine.
+      this.passOverride = false;
     }
   }
 
@@ -505,9 +652,15 @@ export class SyncEngine {
   private async pushPending(
     scan: PendingScan | null | undefined,
     run: PushRun
-  ): Promise<void> {
+  ): Promise<Map<string, string>> {
+    // R16-H1: paths the server refused this pass. They stay on this device
+    // and are absent from the index, so the pass cannot claim a clean sync.
+    const refused = new Map<string, string>();
+    // R15-2: one Notice per quarantined path per pass — a path that stays
+    // pending is re-scanned every pass, and re-quarantining it is expected.
+    const reported = new Set<string>();
     const { pending, deleted, index } = scan ?? await this.scanPending();
-    if (pending.length === 0 && deleted.length === 0) return;
+    if (pending.length === 0 && deleted.length === 0) return refused;
 
     type PendingPushItem =
       | { kind: "file"; file: LocalFileSnapshot }
@@ -579,9 +732,23 @@ export class SyncEngine {
             item.source === "delete" ? [item.deletedPath] : []
           );
           ifMatch = await this.applyPushedBatch(response, files, paths, ifMatch);
+        },
+        // R16-H1: the withholding mechanism shipped without its reporting
+        // half, so a refused file vanished from the vault under a GREEN
+        // status, with lastSyncSuccessAt advanced and no notice anywhere —
+        // worse than the wedged state it replaced, which at least showed
+        // red. The callback is optional, which is why neither the type
+        // checker nor the dead-export guard could see that this call site
+        // never passed it.
+        onQuarantined: (path, code) => {
+          refused.set(path, code);
+          if (reported.has(path)) return;
+          reported.add(path);
+          this.reportPathRefused(path, code);
         }
       });
     }
+    return refused;
   }
 
   private async applyPushedBatch(
@@ -660,9 +827,15 @@ export class SyncEngine {
   private async pushPendingWithHeadMismatchRetry(
     scan: PendingScan | null,
     run: PushRun
-  ): Promise<void> {
+  ): Promise<Map<string, string>> {
+    // R16-H1: a 409 retry reclassifies and re-pushes, so the refusals from
+    // the first attempt must survive into the answer the pass reports on.
+    const refused = new Map<string, string>();
+    const merge = (next: Map<string, string>) => {
+      for (const [path, code] of next) refused.set(path, code);
+    };
     try {
-      await this.pushPending(scan, run);
+      merge(await this.pushPending(scan, run));
     } catch (error) {
       if (
         error instanceof ApiError &&
@@ -670,11 +843,12 @@ export class SyncEngine {
         error.code === "head_mismatch"
       ) {
         const retryScan = await this.pullIfChanged();
-        await this.pushPending(retryScan, run);
-        return;
+        merge(await this.pushPending(retryScan, run));
+        return refused;
       }
       throw error;
     }
+    return refused;
   }
 
   private async applyPull(pull: PullResponse): Promise<PendingScan | null> {
@@ -742,6 +916,11 @@ export class SyncEngine {
           if (isLocalDirty(local, indexed?.lastSyncedHash)) {
             await this.writeConflict(file.path, local);
           }
+          // R15-5: the dirty verdict above came from the scan snapshot,
+          // taken before this file's download/hash. Re-read it: an edit
+          // landing in that gap must be captured in a sidecar, not lost
+          // under the remote write.
+          if (!(await this.mayStillChangeDisk(file.path, local?.hash))) continue;
           // The download/hash awaits above can straddle an abort (M-10
           // per-file granularity): re-check so a replaced generation
           // never writes into the vault it no longer owns.
@@ -771,6 +950,9 @@ export class SyncEngine {
           if (actualHash !== file.blob_hash) {
             throw new Error(`Blob hash mismatch for ${file.path}`);
           }
+          // R15-5: same re-read as the text branch — the blob download is
+          // the longest window of all.
+          if (!(await this.mayStillChangeDisk(file.path, local?.hash))) continue;
           // Same as the text branch: the download/hash awaits can
           // straddle an abort, so re-check before the vault write.
           this.throwIfAborted();
@@ -793,6 +975,10 @@ export class SyncEngine {
         if (isLocalDirty(local, indexed?.lastSyncedHash)) {
           await this.writeConflict(path, local);
         }
+        // R15-5: the delete decision above is the most destructive one in
+        // the engine — trash destroys the bytes. Re-read the file: an edit
+        // landing after the snapshot is captured in a sidecar instead.
+        if (!(await this.mayStillChangeDisk(path, local?.hash))) continue;
         // writeConflict above awaits; an abort landing in that window
         // must still stop the trash (M-10 per-file granularity).
         this.throwIfAborted();
@@ -958,6 +1144,26 @@ export class SyncEngine {
     );
   }
 
+  /**
+   * R16-H1: tell the user, once per path per pass, that the server refused
+   * this file and it is therefore staying on this device only.
+   *
+   * A refused path is a property of the path or its content, so no amount
+   * of retrying changes it: the file is invisible to every other device
+   * until the user renames or edits it. Withholding it silently was worse
+   * than the wedged state R15-2 replaced, because the wedged state showed
+   * red while this one showed green.
+   */
+  private reportPathRefused(path: string, code: string): void {
+    const message = format((this.opts.labels ?? strings()).pushPathRejected, {
+      path,
+      reason: code
+    });
+    debugLog("[pkv-sync] the server refused this path; it stays local:", path, code);
+    new Notice(message);
+    this.opts.setStatus("error", message);
+  }
+
   private reportSidecarFailure(path: string, error: unknown): void {
     const message = format(
       (this.opts.labels ?? strings()).conflictCopyFailed,
@@ -968,7 +1174,73 @@ export class SyncEngine {
     this.opts.setStatus("error", message);
   }
 
-  private async applyInlineText(path: string, content: string, commit: string): Promise<void> {
+  /**
+   * Re-read a path and decide whether this engine may still change it.
+   *
+   * R15-5: four places decide "the local copy is clean, so the remote verdict
+   * may overwrite it", and every one of them then awaits — a blob download, a
+   * text fetch, a hash, or a whole batch of those. The file can change under
+   * a verdict that was true when it was formed. `applyInlineText` and
+   * `applyDelete` each grew their own re-read for this (R12-3, audit H-4);
+   * the batch pull loop never did, and it has the widest window in the
+   * codebase because one pull can span dozens of round trips.
+   *
+   * Returns true when the caller may proceed with the write or trash. Returns
+   * false when the disk moved: the NEW content is captured in a conflict
+   * sidecar, so the caller must leave the file alone and let the next pass
+   * reconcile. `expectedHash` is the hash the caller's snapshot saw;
+   * `undefined` means nothing was recorded about this path, so nothing can be
+   * proven stale and the caller proceeds on its own rules.
+   */
+  private async mayStillChangeDisk(
+    path: string,
+    expectedHash: string | undefined
+  ): Promise<boolean> {
+    if (expectedHash === undefined) {
+      // R16-H3: "the scan saw no local file" is NOT "there is no local
+      // file". The scan happens once, at the top of applyPull, and this
+      // call can be dozens of network round trips later — long enough for
+      // the user to create the very path the pull is about to add. The
+      // inline path has always guarded this shape ("presence mismatch
+      // means unknown local state"); returning true here let the remote
+      // body overwrite a file that had never been pushed anywhere.
+      //
+      // R16-7: the mirror case — the file existed at scan time and is gone
+      // now — reaches the same place through a throw from `snapshot`. Both
+      // are "the disk is not what the snapshot said", so both are answered
+      // here, once.
+      if (!this.opts.vault.exists(path)) return true;
+      const appeared = await this.opts.vault.snapshot(path, this.opts.textExtensions);
+      await this.writeConflict(path, appeared);
+      return false;
+    }
+    // R16-7: a path deleted after the scan throws out of `snapshot`, which
+    // failed the whole pass and pinned the head until the next one. A
+    // vanished file is simply a disk that moved; treat it as such.
+    if (!this.opts.vault.exists(path)) return false;
+    const recheck = await this.opts.vault.snapshot(path, this.opts.textExtensions);
+    if (recheck.hash === expectedHash) return true;
+    await this.writeConflict(path, recheck);
+    return false;
+  }
+
+  /**
+   * The throwing half of [`mayStillChangeDisk`]. A caller that already has
+   * the file's current hash (the inline paths read it as part of their own
+   * dirty check) answers a mismatch by refusing, not by writing a sidecar:
+   * its caller's recovery path is a full pull, which applies the sidecar
+   * rule itself. Keeping both halves in one file — and both reading the disk
+   * the same way — is what stops a third dialect of "is it still clean?"
+   * from appearing.
+   */
+  private async stillMatchesOnDisk(path: string, expectedHash: string): Promise<boolean> {
+    // R16-7: a file that vanished under us did not "still match".
+    if (!this.opts.vault.exists(path)) return false;
+    const recheck = await this.opts.vault.snapshot(path, this.opts.textExtensions);
+    return recheck.hash === expectedHash;
+  }
+
+  private async applyInlineText(path: string, content: string): Promise<void> {
     // Dirty check + write must look at one consistent index snapshot.
     // updateIndex serialises through the underlying data store so two
     // concurrent inline-event handlers cannot observe stale state or
@@ -1005,9 +1277,10 @@ export class SyncEngine {
         // re-read and re-hash. If the file changed on disk between the two
         // reads (user edit landing in the gap), the index would be advanced
         // over a stale view — refuse instead of clobbering the edit.
-        const recheckContent = await this.opts.vault.readText(path);
-        const recheckHash = await sha256Text(recheckContent);
-        if (recheckHash !== localHash) {
+        // Here a refusal must THROW (not sidecar-and-skip): the caller is
+        // the event loop, which answers an InlineApplyDirtyError with a
+        // full pull that applies the same rule.
+        if (!(await this.stillMatchesOnDisk(path, localHash))) {
           throw new InlineApplyDirtyError(path);
         }
       }
@@ -1043,7 +1316,7 @@ export class SyncEngine {
     this.opts.setStatus("error", message);
   }
 
-  private async applyDelete(path: string, commit: string): Promise<void> {
+  private async applyDelete(path: string): Promise<void> {
     this.throwIfAborted();
     await this.opts.index.updateIndex(async (index) => {
       const indexed = index.files[path];
@@ -1060,21 +1333,20 @@ export class SyncEngine {
       }
       if (indexed && fileExists) {
         const local = await this.opts.vault.snapshot(path, this.opts.textExtensions);
-        const localHashAtCheck: string | undefined = local?.hash;
+        // Captured before the dirty verdict narrows `local` (the predicate
+        // is a type guard, so the false branch reads as "not a snapshot").
+        const hashAtCheck: string | undefined = local?.hash;
         if (isLocalDirty(local, indexed.lastSyncedHash)) {
           await this.writeConflict(path, local);
           return index;
         }
-        // R12-3: close the snapshot→trash TOCTOU window, mirroring
-        // applyInlineText's recheck. An edit landing between the snapshot
-        // (which showed the file clean, or whose conflict copy was just
-        // written) and the trash would be DESTROYED by the trash while the
-        // sidecar holds only the pre-edit bytes. Re-read + re-hash: a
-        // mismatch writes a fresh sidecar capturing the new content and
-        // skips the trash — the full pull then reconciles.
-        const recheck = await this.opts.vault.snapshot(path, this.opts.textExtensions);
-        if (localHashAtCheck !== undefined && recheck.hash !== localHashAtCheck) {
-          await this.writeConflict(path, recheck);
+        // R12-3 / R15-5: close the snapshot→trash TOCTOU window. An edit
+        // landing between the snapshot (which showed the file clean, or
+        // whose conflict copy was just written) and the trash would be
+        // DESTROYED by the trash while the sidecar holds only the pre-edit
+        // bytes. A mismatch writes a fresh sidecar capturing the new
+        // content and skips the trash — the next pass reconciles.
+        if (!(await this.mayStillChangeDisk(path, hashAtCheck))) {
           return index;
         }
       }

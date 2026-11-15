@@ -75,6 +75,16 @@ class FakeVault {
     this.files = this.files.filter((f) => f.path !== path);
   }
 
+  /** The real adapter re-reads the file; the R15-5 recheck relies on it. */
+  async snapshot(
+    path: string,
+    _textExtensions?: Set<string>
+  ): Promise<LocalFileSnapshot> {
+    const file = this.files.find((entry) => entry.path === path);
+    if (!file) throw new Error(`not found: ${path}`);
+    return file;
+  }
+
   /** Snapshot of current vault tree (path → content) excluding conflict paths. */
   tree(): Map<string, string> {
     const m = new Map<string, string>();
@@ -676,7 +686,10 @@ describe("Sync convergence scenarios", () => {
     // B modifies
     editFile(B, "note.md", "B-modified");
 
-    // A syncs (pushes delete)
+    // A syncs (pushes delete). D3: deleting the only file leaves a
+    // zero-file scan against a populated index — arm the explicit
+    // confirm so the delete may push.
+    A.engine.allowEmptyScanDeletesOnce();
     await sync(A);
 
     // B syncs (pushes modification — server sees A's delete, keeps B's content)

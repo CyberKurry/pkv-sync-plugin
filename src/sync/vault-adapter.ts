@@ -1,8 +1,9 @@
-import { TFile, TFolder, type App, type FileManager, type Vault } from "obsidian";
+import { Notice, TFile, TFolder, type App, type FileManager, type Vault } from "obsidian";
 import { isConflictPath } from "./conflict-files";
 import { sha256Bytes, sha256TextWithLength } from "./hash";
 import type { LocalFileSnapshot, LocalIndex } from "./types";
-import { isTextPath } from "../util";
+import { format, type Strings } from "../i18n";
+import { debugLog, isTextPath } from "../util";
 
 const SCAN_SNAPSHOT_BATCH_SIZE = 8;
 
@@ -34,8 +35,21 @@ export interface VaultScanOptions {
 export class ObsidianVaultAdapter implements VaultAdapter {
   private readonly vault: Vault;
   private readonly fileManager: FileManager;
+  private pruneNotified = false;
 
-  constructor(host: VaultHost) {
+  /**
+   * Both flags are LIVE callbacks, not constructor-captured values: the
+   * settings toggle saves with rebuild:false, so the running engine's
+   * adapter must re-read the switch on every trash() (a captured boolean
+   * stayed stale until the next engine rebuild), and the Notice must
+   * follow the plugin's configured language like every other notice
+   * (plugin.text()), not the navigator locale.
+   */
+  constructor(
+    host: VaultHost,
+    private readonly pruneEnabled: () => boolean,
+    private readonly labels: () => Strings
+  ) {
     this.vault = host.vault;
     this.fileManager = host.fileManager;
   }
@@ -91,8 +105,13 @@ export class ObsidianVaultAdapter implements VaultAdapter {
     const safePath = requireSafeVaultPath(path);
     const file = this.vault.getAbstractFileByPath(safePath);
     // FileManager honours the user's "deleted files" preference (system or
-    // local trash); Vault#trash is deprecated in favour of it.
-    if (file) await this.fileManager.trashFile(file);
+    // local trash); Vault#trash is deprecated in favour of it. D1: folders
+    // reuse the SAME entry point as files (spec §4.3) — under a
+    // "delete permanently" preference this is no more destructive than the
+    // file delete that just happened through the same call.
+    if (!file) return;
+    await this.fileManager.trashFile(file);
+    if (this.pruneEnabled()) await this.pruneEmptyParentsOf(safePath);
   }
 
   exists(path: string): boolean {
@@ -180,6 +199,50 @@ export class ObsidianVaultAdapter implements VaultAdapter {
       }
     }
   }
+
+  /**
+   * Best effort: a delete may have emptied the parent chain. Emptiness is
+   * read from the filesystem (adapter.list), never TFolder.children — the
+   * vault cache does not list dot-entries, so a folder holding only
+   * `.nomedia` looks empty there. Never throws: the file delete above
+   * already happened and the caller must be able to record it (spec §4.4).
+   *
+   * Walk consistency: trashFile awaits the physical rename and Obsidian
+   * reconciles its cache per adapter operation, so listing the PARENT on
+   * the next iteration already reflects the child folder's removal.
+   *
+   * M-10 exemption (deliberate): the engine discipline checks
+   * throwIfAborted() before every vault write/delete, but this walk runs
+   * unsupervised after the last check. Acceptable because it stops at the
+   * first non-empty parent, touches only folders that are already empty,
+   * follows the user's deletion preference (trash by default, so
+   * recoverable), and folders never enter the sync index.
+   */
+  private async pruneEmptyParentsOf(filePath: string): Promise<void> {
+    try {
+      let dir = parentOf(filePath);
+      while (dir !== null) {
+        if (startsWithDotRoot(dir) || isUnderConfigDir(dir, this.vault.configDir)) return;
+        const folder = this.vault.getAbstractFileByPath(dir);
+        if (!(folder instanceof TFolder)) return;
+        const listed = await this.vault.adapter.list(dir);
+        if (listed.files.length > 0 || listed.folders.length > 0) return;
+        await this.fileManager.trashFile(folder);
+        this.notifyFirstPrune(dir);
+        dir = parentOf(dir);
+      }
+    } catch (error) {
+      debugLog("[pkv-sync] empty-folder prune skipped:", error);
+    }
+  }
+
+  private notifyFirstPrune(dir: string): void {
+    // D2: the prune reorganizes the user's folder tree without them asking;
+    // one Notice per adapter lifetime points at the setting to disable it.
+    if (this.pruneNotified) return;
+    this.pruneNotified = true;
+    new Notice(format(this.labels().firstPruneNotice, { path: dir }));
+  }
 }
 
 export function shouldSyncPath(path: string): boolean {
@@ -264,20 +327,10 @@ function hasEscapedPathSeparator(path: string): boolean {
 function hasUnsafeDecodedShape(path: string): boolean {
   let current = path;
   for (let i = 0; i < 4; i++) {
-    let decoded: string;
-    try {
-      decoded = decodeURIComponent(current);
-    } catch {
-      // R12-2: distinguish two throw shapes. A MALFORMED escape pattern
-      // (`%` not followed by valid hex — e.g. the ordinary name `100%.md`)
-      // is not an escape at all; leave it to the literal rules. A
-      // well-formed `%XX` that decodes into non-UTF-8 bytes (`a%FFb.md`)
-      // is what the server refuses — refuse here too.
-      if (/%[0-9a-f]{2}/i.test(current)) {
-        return true;
-      }
-      return false;
-    }
+    const decoded = decodeRound(current);
+    // R12-2: a well-formed escape whose bytes are not UTF-8 — the server
+    // answers InvalidUtf8Escape, so the file can never converge.
+    if (decoded === INVALID_UTF8) return true;
     if (decoded === current) {
       // R14-M1: fixed point reached. The server stores every pushed path
       // at its fixed-point decode (decode_to_fixed_point, the idempotent
@@ -290,12 +343,91 @@ function hasUnsafeDecodedShape(path: string): boolean {
       return current !== path;
     }
     current = normalizeSeparators(decoded);
-    if (hasEscapedPathSeparator(current)) return true;
-    if (!isSafePathShape(current) || hasProtectedRoot(current) || startsWithDotRoot(current)) {
-      return true;
-    }
+    if (unsafeDecodedState(current)) return true;
   }
-  return false;
+  // R15-1: the round budget is exhausted and the value is STILL moving.
+  // The server's twin (decode_to_fixed_point in server/src/storage/path.rs)
+  // runs one final round OUTSIDE its loop: stable → accepted and stored at
+  // the fixed point, still changing → PercentEncodingTooDeep → 400
+  // invalid_path. Returning `false` here meant "acceptable", which was
+  // wrong in both directions: a chain needing exactly 4 rounds was folded
+  // into a sibling-colliding server name (R14-M1's failure, one round
+  // deeper), and a chain needing 5+ was pushed into a deterministic 400
+  // that wedges the whole vault (R15-2). Same final round as the server,
+  // same verdict.
+  const final = decodeRound(current);
+  if (final === INVALID_UTF8) return true;
+  if (final === current) {
+    // Stable one round past the budget: the server accepts it and stores
+    // it at this fixed point, which is exactly R14-M1's folding shape —
+    // so the verdict is the same as reaching the fixed point inside the
+    // loop, not "accepted because the chain ended".
+    return current !== path;
+  }
+  return true;
+}
+
+/** Sentinel for "this round produced bytes that are not valid UTF-8". */
+const INVALID_UTF8 = Symbol("invalid_utf8");
+
+const HEX_DIGIT = /^[0-9a-fA-F]$/;
+const utf8Encoder = new TextEncoder();
+const strictUtf8Decoder = new TextDecoder("utf-8", { fatal: true });
+
+/**
+ * One decode round, modelled on the server's `decode_round`.
+ *
+ * R16-H2: `decodeURIComponent` is ALL-OR-NOTHING — a single malformed
+ * triplet makes the whole call throw — while the server's
+ * `percent_decode_str` decodes every well-formed `%XX` to a byte, leaves
+ * the malformed ones verbatim, and only then requires the whole byte
+ * buffer to be valid UTF-8. The difference is not cosmetic: for
+ * `a%25zz.md` the server folds to `a%zz.md` (a DIFFERENT stored path than
+ * the local key) while `decodeURIComponent` throws and the plugin read
+ * that as "nothing left to decode", accepting the file. Two local files
+ * then collide on one server path with no conflict sidecar — R14-M1
+ * again, reached through a malformed tail instead of the round budget.
+ *
+ * Returns:
+ * - the decoded string when the round succeeded (identical to `value`
+ *   when there was nothing to decode),
+ * - [`INVALID_UTF8`] when the bytes are not valid UTF-8 (`a%FFb.md`) —
+ *   the server answers `InvalidUtf8Escape`, so the caller must refuse.
+ */
+function decodeRound(value: string): string | typeof INVALID_UTF8 {
+  const bytes: number[] = [];
+  for (let i = 0; i < value.length; ) {
+    if (
+      value[i] === "%" &&
+      i + 2 < value.length &&
+      HEX_DIGIT.test(value[i + 1]) &&
+      HEX_DIGIT.test(value[i + 2])
+    ) {
+      bytes.push(Number.parseInt(value.slice(i + 1, i + 3), 16));
+      i += 3;
+      continue;
+    }
+    // Copy the whole code point so astral characters survive as one unit.
+    const codePoint = value.codePointAt(i);
+    if (codePoint === undefined) break;
+    const chunk = String.fromCodePoint(codePoint);
+    for (const byte of utf8Encoder.encode(chunk)) bytes.push(byte);
+    i += chunk.length;
+  }
+  try {
+    return strictUtf8Decoder.decode(new Uint8Array(bytes));
+  } catch {
+    return INVALID_UTF8;
+  }
+}
+
+function unsafeDecodedState(value: string): boolean {
+  if (hasEscapedPathSeparator(value)) return true;
+  return (
+    !isSafePathShape(value) ||
+    hasProtectedRoot(value) ||
+    startsWithDotRoot(value)
+  );
 }
 
 function hasProtectedRoot(path: string): boolean {
@@ -311,6 +443,15 @@ function hasProtectedSegment(path: string): boolean {
 
 function startsWithDotRoot(path: string): boolean {
   return path.split("/", 1)[0].startsWith(".");
+}
+
+function parentOf(path: string): string | null {
+  const slash = path.lastIndexOf("/");
+  return slash < 0 ? null : path.slice(0, slash);
+}
+
+function isUnderConfigDir(dir: string, configDir: string): boolean {
+  return dir === configDir || dir.startsWith(`${configDir}/`);
 }
 
 /**

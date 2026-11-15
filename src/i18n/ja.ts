@@ -106,6 +106,8 @@ export const ja = {
   migrateProgressSummary:
     "{processed}/{total} ファイル - バッチ {batch}/{batches} - blob {blobs}/{totalBlobs}",
   migrateCompleteSummary: "{count} ファイルを移行 - {skipped} 件をスキップ",
+  migrateCompleteRefused:
+    "{count} 個のファイルを移行できず、新しい Vault に含まれていません: {paths}",
   migrateFailed: "移行に失敗しました",
   migrateCompleteNotice: "{count} ファイルを「{name}」に移行しました",
   viewSyncStatusCommand: "同期ステータスの詳細を表示",
@@ -119,6 +121,10 @@ export const ja = {
     "{path} を同期できません: シリアライズされたリクエストは {bytes} バイトで、サーバーのインライン上限 {limit} バイトを超えています。",
   pushProxyTooLarge:
     "{path} を同期できません: 単一ファイルのリクエスト（{bytes} バイト）もサーバーまたはプロキシによって大きすぎると判定されました。",
+  pushPathsRefusedSummary:
+    "{count} 個のファイルを同期できず、この端末にのみ残ります。",
+  pushPathRejected:
+    "{path} を同期できません: サーバーがこのパスを拒否しました（{reason}）。名前を変更するか編集するまで、この端末にのみ残ります。",
   pushRetryLater: "サーバーがこのプッシュを一時的に拒否しました。{seconds} 秒後に再試行します。",
   pushSplitBudgetExceeded:
     "リクエスト超過が {count} 回発生したため、プッシュを停止しました。サーバーまたはプロキシの制限を確認してください。",
@@ -127,7 +133,17 @@ export const ja = {
   conflictNotice: "PKV Sync の競合: {path}",
   conflictCopyFailed: "競合コピーを書き込めませんでした（{path}）：{reason}",
   sseAuthFailed: "リアルタイム同期を停止しました：サーバーがトークンを拒否しました",
+  emptyScanHeld: "Vault スキャンでファイルが見つからず、削除を保留中です",
+  confirmEmptySyncCommand: "空の Vault の削除を確認して同期",
+  emptyScanConfirmTitle: "Vault 全件削除の確認",
+  emptyScanConfirmBody:
+    "直近のスキャンでファイルが 0 件なのに、同期インデックスには {count} 件残っています。多くの場合、削除ではなくストレージ利用不可（権限失効、ドライブ未マウント）を意味します。確認するとこれらの削除を全デバイスへ同期します。",
+  emptyScanConfirmAccept: "それでも削除を同期",
+  modalCancel: "キャンセル",
   connectedToServer: "{serverName} に接続しました",
+  connectConfirmTitle: "サーバーへ接続",
+  connectConfirmBody:
+    "PKV Sync を {server} に接続しますか？リンク内のサーバーアドレスとデプロイキーを保存します。ログインには引き続き自分のアカウントを使います。",
   changeServer: "サーバーを変更",
   loggedIn: "ログインしました",
   registeredAndLoggedIn: "登録してログインしました",
@@ -172,6 +188,9 @@ export const ja = {
   defaultIosDevice: "iOS デバイス",
   defaultDesktopDevice: "デスクトップ",
   enableHistoryUi: "履歴と差分の UI を有効化",
+  pruneEmptyFolders: "リモート削除で空になったフォルダを整理",
+  firstPruneNotice:
+    "PKV Sync が空のフォルダ {path} を削除しました（設定で無効化できます）",
   showFileHistoryCommand: "ファイル履歴を表示",
   showVaultHistoryCommand: "Vault 履歴を表示",
   fileHistoryMenu: "PKV Sync: ファイル履歴",

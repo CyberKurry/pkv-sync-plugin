@@ -65,6 +65,10 @@ import { RestoreConfirmModal } from "./ui/restore-confirm";
 import { RollbackConfirmModal } from "./ui/rollback-confirm-modal";
 import { PKVSyncSettingTab } from "./ui/settings-tab";
 import { SyncStatusModal } from "./ui/sync-modal";
+import {
+  applyConnectDeepLink,
+  ConnectConfirmModal
+} from "./ui/connect-confirm";
 import { addConflictResolveMenuItem } from "./ui/conflict-menu";
 import { ConflictsListModal } from "./ui/conflicts-list-modal";
 import { ConflictResolveModal } from "./ui/conflict-resolve-modal";
@@ -83,6 +87,7 @@ import {
   type PluginUpdateStatus
 } from "./services/update-check";
 import { errorToMessage, isTextPath } from "./util";
+import { engineStartAllowed } from "./workspace-readiness";
 
 type CompletionState = "old_safe" | "new_committed" | "disk_uncertain";
 
@@ -107,6 +112,13 @@ export default class PKVSyncPlugin extends Plugin {
   updateDelayTimer: number | null = null;
   updateIntervalTimer: number | null = null;
   private serverCapabilities: ServerCapabilities | null = null;
+  /**
+   * Set by onunload() when the plugin goes away before the workspace
+   * layout is ready. The workspace owns the onLayoutReady queue and it
+   * returns no EventRef, so the queued startup callback can still fire
+   * on an unloaded plugin and must bail out.
+   */
+  private unloadedBeforeLayout = false;
   serverPushLimits: Readonly<PushLimits> = LEGACY_PUSH_LIMITS;
   /**
    * Set when a local write could not be confirmed on disk. Every entry point
@@ -217,14 +229,39 @@ export default class PKVSyncPlugin extends Plugin {
     );
     this.updateStatus();
     this.addSettingTab(new PKVSyncSettingTab(this.app, this));
-    this.registerVaultWatchers();
     registerCommands(this, t);
+    // 3A: obsidian://pkv-connect?s=<server>&k=<deployment key>. Cold-start
+    // links are held by the main process until the renderer finishes, so
+    // registering during onload() is in time (spec §6.3.1). Any web page
+    // can trigger the scheme, so the link only opens a confirm modal and
+    // the flow itself is fenced by parseServerUrl (spec §6.3.2).
+    this.registerObsidianProtocolHandler("pkv-connect", (params) => {
+      const server = typeof params.s === "string" ? params.s : "";
+      const key = typeof params.k === "string" ? params.k : "";
+      if (!server) return;
+      // Fresh text() per link: the onload-time `t` would keep speaking the
+      // language that was configured at startup after a language change.
+      const cur = this.text();
+      new ConnectConfirmModal(this.app, cur, server, () =>
+        applyConnectDeepLink(this, cur, server, key)
+      ).open();
+    });
     this.registerHistoryFileMenu();
-    this.rebuildSyncEngine();
+    // 0b: the vault file index is built AFTER plugin onload() runs; defer
+    // engine start and vault watchers until the first enumeration finished
+    // (obsidian.d.ts documents that vault 'create' fires for every existing
+    // file on load unless handlers are registered inside onLayoutReady).
+    this.app.workspace.onLayoutReady(() => {
+      // The workspace owns the onLayoutReady queue; it may fire after this plugin was unloaded (0b review)
+      if (this.unloadedBeforeLayout) return;
+      this.registerVaultWatchers();
+      this.rebuildSyncEngine();
+    });
     this.scheduleUpdateChecks();
   }
 
   onunload(): void {
+    this.unloadedBeforeLayout = true;
     this.orchestrator.dispose();
   }
 
@@ -713,6 +750,10 @@ export default class PKVSyncPlugin extends Plugin {
 
   private rebuildSyncEngine(): void {
     if (this.persistenceRecoveryRequired) return;
+    // 0b: never start an engine before the vault's first enumeration
+    // finished; the queued onLayoutReady callback is the only starter
+    // during boot (spec §3.4).
+    if (!engineStartAllowed(this.app.workspace)) return;
     // R8-3: a rebuild replaces the engine (and its generation guard);
     // the remembered engine status belongs to the old engine.
     this.statusEl?.clearEngineStatus();
@@ -1069,7 +1110,13 @@ export default class PKVSyncPlugin extends Plugin {
   private async hasUnsyncedLocalChanges(path: string): Promise<boolean> {
     try {
       const index = await this.loadSyncIndex();
-      const adapter = new ObsidianVaultAdapter(this.app);
+      // Snapshot-only usage (never trashes): pruning is permanently off
+      // here and the labels callback is never read.
+      const adapter = new ObsidianVaultAdapter(
+        this.app,
+        () => false,
+        () => strings()
+      );
       const lastSyncedHash = index.files[path]?.lastSyncedHash;
       let snapshot;
       try {

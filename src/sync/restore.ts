@@ -1,4 +1,5 @@
 import type { HistoryApi } from "../api/history-client";
+import { strings } from "../i18n";
 import { errorToMessage } from "../util";
 import { textByteLength } from "./text-encoding";
 import { ObsidianVaultAdapter, type VaultHost } from "./vault-adapter";
@@ -35,7 +36,9 @@ export async function restoreFileToCommit(
   }
 
   const existed = ctx.app.vault.getAbstractFileByPath(ctx.path) !== null;
-  const adapter = new ObsidianVaultAdapter(ctx.app);
+  // Write-only usage (never trashes): pruning is permanently off here
+  // and the labels callback is never read.
+  const adapter = new ObsidianVaultAdapter(ctx.app, () => false, () => strings());
   try {
     if (historical.kind === "text") {
       await adapter.writeText(ctx.path, historical.text);

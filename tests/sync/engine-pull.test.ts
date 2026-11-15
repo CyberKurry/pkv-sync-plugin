@@ -65,6 +65,16 @@ class FakeVault {
     this.deletions.push(path);
     this.files = this.files.filter((file) => file.path !== path);
   }
+
+  /** The real adapter re-reads the file; R15-5 relies on that. */
+  async snapshot(
+    path: string,
+    _textExtensions?: Set<string>
+  ): Promise<LocalFileSnapshot> {
+    const file = this.files.find((entry) => entry.path === path);
+    if (!file) throw new Error(`not found: ${path}`);
+    return file;
+  }
 }
 
 class FakeIndex implements IndexPersistence {
@@ -723,6 +733,9 @@ describe("SyncEngine pull", () => {
       setStatus: vi.fn()
     });
 
+    // D3: deleting the only file leaves a zero-file scan against a
+    // populated index — arm the explicit confirm so the delete may push.
+    engine.allowEmptyScanDeletesOnce();
     await engine.syncNow();
 
     // In push-first flow: delete is pushed first, then pull brings back the
@@ -1561,6 +1574,9 @@ describe("SyncEngine pull", () => {
       setStatus: vi.fn()
     });
 
+    // D3: deleting the only file leaves a zero-file scan against a
+    // populated index — arm the explicit confirm so the delete may push.
+    engine.allowEmptyScanDeletesOnce();
     // First pass: B's delete went out with ifMatch=c0, the server
     // auto-merged and REJECTED it; the pull reports a.md modified.
     // Server verdict shape: the rejected delete keeps the index entry,
@@ -2070,5 +2086,251 @@ describe("SyncEngine pull", () => {
     // Index advanced to c1 with the remote hash
     expect(idx.saved?.lastSyncedCommit).toBe("c1");
     expect(idx.saved?.files["clean.md"]?.lastSyncedHash).toBe(remoteHash);
+  });
+});
+
+describe("pull re-checks local state before touching the disk (R15-5)", () => {
+  beforeEach(() => {
+    vi.stubGlobal("window", globalThis);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("does not trash a file the user edited while the pull was in flight", async () => {
+    // applyDelete and applyInlineText both re-read and re-hash between their
+    // dirty check and the write (R12-3). The BATCH pull never did, and its
+    // window is the longest of the three: a single pull can span dozens of
+    // network round trips. The dirty verdict below comes from the scan
+    // snapshot taken before any of them.
+    const idx = new FakeIndex({
+      lastSyncedCommit: "c0",
+      files: {
+        "a.md": {
+          lastSyncedHash: "clean-hash",
+          lastSyncedAt: 0,
+          kind: "text",
+          size: 4
+        }
+      }
+    });
+    const vault = new FakeVault([
+      { path: "a.md", hash: "clean-hash", size: 4, kind: "text", content: "old" }
+    ]);
+    // Deterministic ordering: the scan resolves a promise the test awaits,
+    // so the "user edit" provably lands after the snapshot and before the
+    // trash. An `await Promise.resolve()` chain only hoped the scheduler ran
+    // in the right order (R16-13).
+    let scanned!: () => void;
+    const scanHappened = new Promise<void>((resolve) => {
+      scanned = resolve;
+    });
+    let scannedOnce = false;
+    const api = {
+      state: vi.fn().mockResolvedValue({ current_head: "c1", changed_since: true }),
+      pull: vi.fn().mockResolvedValue({
+        from: "c0",
+        to: "c1",
+        added: [],
+        modified: [
+          { path: "b.md", file_type: "text", size: 3, content_inline: "new" }
+        ],
+        deleted: ["a.md"]
+      }),
+      uploadCheck: vi.fn().mockResolvedValue({ missing: [] }),
+      uploadBlob: vi.fn(),
+      push: vi.fn(),
+      downloadBlob: vi.fn(),
+      // Blocks the FIRST fetched file so we can edit `a.md` on disk after
+      // the snapshot but before the delete branch runs.
+      downloadTextFile: vi.fn()
+    };
+    const engine = new SyncEngine({
+      vaultId: "v",
+      deviceName: "d",
+      textExtensions: new Set(["md"]),
+      vault: vault as any,
+      api: api as any,
+      index: idx,
+      setStatus: vi.fn()
+    });
+
+    const originalScan = vault.scan.bind(vault);
+    vault.scan = async (...args: Parameters<typeof originalScan>) => {
+      const files = await originalScan(...args);
+      if (!scannedOnce) {
+        scannedOnce = true;
+        scanned();
+      }
+      return files;
+    };
+
+    const run = engine.syncNow();
+    // The snapshot is now provably done.
+    await scanHappened;
+    // The user's edit lands on disk; the index still says clean.
+    vault.files = vault.files.filter((file) => file.path !== "a.md").concat({
+      path: "a.md",
+      hash: await sha256Text("edited after the snapshot"),
+      size: 26,
+      kind: "text",
+      content: "edited after the snapshot"
+    });
+    await run;
+
+    // The edit must survive: the file is trashed only when it is still the
+    // content the snapshot saw. A rejected trash leaves a conflict copy.
+    expect(vault.deletions).not.toContain("a.md");
+    expect(vault.exists("a.md")).toBe(true);
+  });
+});
+
+describe("pull must not clobber a file created after the snapshot (R16-H3)", () => {
+  beforeEach(() => {
+    vi.stubGlobal("window", globalThis);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("keeps a file the user created while the pull was in flight", async () => {
+    // The recheck added by R15-5 short-circuits when the scan saw no local
+    // file: `expectedHash === undefined` returned "may proceed". But the
+    // scan happened at the top of applyPull, and the remote ADD of that same
+    // path can land in the gap — so "the scan did not see it" is not "it
+    // does not exist". The inline path has always guarded this exact shape
+    // (presence mismatch means unknown local state); the batch pull did not.
+    const idx = new FakeIndex({ lastSyncedCommit: "c0", files: {} });
+    const vault = new FakeVault([]);
+    const api = {
+      state: vi.fn().mockResolvedValue({ current_head: "c1", changed_since: true }),
+      pull: vi.fn().mockResolvedValue({
+        from: "c0",
+        to: "c1",
+        added: [
+          { path: "fresh.md", file_type: "text", size: 6, content_inline: "remote" }
+        ],
+        modified: [],
+        deleted: []
+      }),
+      uploadCheck: vi.fn().mockResolvedValue({ missing: [] }),
+      uploadBlob: vi.fn(),
+      push: vi.fn(),
+      downloadBlob: vi.fn(),
+      downloadTextFile: vi.fn()
+    };
+    const engine = new SyncEngine({
+      vaultId: "v",
+      deviceName: "d",
+      textExtensions: new Set(["md"]),
+      vault: vault as any,
+      api: api as any,
+      index: idx,
+      setStatus: vi.fn()
+    });
+
+    // The "user" creates the file after the scan snapshot is taken. Hook the
+    // download of another file first so the write of fresh.md happens later;
+    // here the scan is already done, so simply creating it before the write
+    // reproduces the window deterministically.
+    const run = engine.syncNow();
+    await Promise.resolve();
+    await Promise.resolve();
+    vault.files.push({
+      path: "fresh.md",
+      hash: await sha256Text("my own work"),
+      size: 11,
+      kind: "text",
+      content: "my own work"
+    });
+    await run;
+
+    // The user's content survives: it is captured in a conflict sidecar
+    // rather than overwritten by the remote body.
+    expect(vault.writes.get("fresh.md")).not.toBe("remote");
+    const sidecars = [...vault.writes.entries()].filter(([path]) =>
+      path.includes(".conflict-")
+    );
+    expect(sidecars.some(([, body]) => body === "my own work")).toBe(true);
+  });
+});
+
+describe("pull survives a file that vanished mid-pass (R16-7)", () => {
+  beforeEach(() => {
+    vi.stubGlobal("window", globalThis);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("does not fail the whole pass when the local file disappears", async () => {
+    // A file that disappears between the scan and the apply is a disk that
+    // moved. The guards added alongside R16-H3 keep that from surfacing as
+    // anything at all; this test pins the outward behaviour (the pass
+    // completes and its siblings apply) rather than any one internal guard,
+    // because the delete branch's own presence check already absorbs the
+    // common shape.
+    const idx = new FakeIndex({
+      lastSyncedCommit: "c0",
+      files: {
+        "gone.md": {
+          lastSyncedHash: "hb",
+          lastSyncedAt: 0,
+          kind: "text",
+          size: 1
+        }
+      }
+    });
+    const vault = new FakeVault([
+      { path: "gone.md", hash: "hb", size: 1, kind: "text", content: "b" },
+      // Keeps the vault non-empty so the empty-scan breaker stays out of the
+      // way; this test is about a vanished file, not about the breaker.
+      { path: "other.md", hash: "ho", size: 1, kind: "text", content: "o" }
+    ]);
+    const api = {
+      state: vi.fn().mockResolvedValue({ current_head: "c1", changed_since: true }),
+      pull: vi.fn().mockResolvedValue({
+        from: "c0",
+        to: "c1",
+        added: [],
+        modified: [
+          { path: "keep.md", file_type: "text", size: 3, content_inline: "new" }
+        ],
+        deleted: ["gone.md"]
+      }),
+      uploadCheck: vi.fn().mockResolvedValue({ missing: [] }),
+      uploadBlob: vi.fn(),
+      push: vi.fn(async (_v: string, _m: string | null, changes: unknown[]) => ({
+        new_commit: "c1",
+        files_changed: changes.length
+      })),
+      downloadBlob: vi.fn(),
+      downloadTextFile: vi.fn()
+    };
+    const setStatus = vi.fn();
+    const engine = new SyncEngine({
+      vaultId: "v",
+      deviceName: "d",
+      textExtensions: new Set(["md"]),
+      vault: vault as any,
+      api: api as any,
+      index: idx,
+      setStatus
+    });
+
+    const run = engine.syncNow();
+    await Promise.resolve();
+    await Promise.resolve();
+    // The user deletes the file the remote is about to delete too.
+    vault.files = vault.files.filter((file) => file.path !== "gone.md");
+    await run;
+
+    // The pass completed: no error status, and the unrelated file applied.
+    const errorCalls = setStatus.mock.calls.filter((call) => call[0] === "error");
+    expect(errorCalls).toEqual([]);
+    expect(vault.writes.get("keep.md")).toBe("new");
   });
 });

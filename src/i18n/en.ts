@@ -107,6 +107,8 @@ export const en = {
   migrateProgressSummary:
     "{processed}/{total} files - batch {batch}/{batches} - blobs {blobs}/{totalBlobs}",
   migrateCompleteSummary: "{count} files migrated - {skipped} skipped",
+  migrateCompleteRefused:
+    "{count} file(s) could not be migrated and were left out of the new vault: {paths}",
   migrateFailed: "Migration failed",
   migrateCompleteNotice: "Migrated {count} files to {name}",
   viewSyncStatusCommand: "View sync status details",
@@ -120,6 +122,10 @@ export const en = {
     "Cannot sync {path}: the serialized request is {bytes} bytes, above the server's {limit}-byte inline limit.",
   pushProxyTooLarge:
     "Cannot sync {path}: even its single-file request ({bytes} bytes) was rejected as too large by the server or proxy.",
+  pushPathsRefusedSummary:
+    "{count} file(s) could not be synced and stay on this device only.",
+  pushPathRejected:
+    "Cannot sync {path}: the server rejected it ({reason}). It stays on this device only until you rename or edit it.",
   pushRetryLater: "The server temporarily rejected this push. Retry in {seconds}s.",
   pushSplitBudgetExceeded:
     "Push stopped after {count} oversized-request failures. Check the server or proxy limit.",
@@ -128,7 +134,17 @@ export const en = {
   conflictNotice: "PKV Sync conflict: {path}",
   conflictCopyFailed: "Could not write the conflict copy for {path}: {reason}",
   sseAuthFailed: "Realtime sync stopped: the server rejected the token",
+  emptyScanHeld: "Vault scan found no files; deletions held",
+  confirmEmptySyncCommand: "Confirm empty-vault deletions",
+  emptyScanConfirmTitle: "Confirm vault deletions",
+  emptyScanConfirmBody:
+    "The last scan found 0 files while the sync index still holds {count} entries. This usually means storage is unavailable (permissions revoked, drive not mounted) rather than that you deleted everything. Confirming will push these deletions to every device.",
+  emptyScanConfirmAccept: "Push deletions anyway",
+  modalCancel: "Cancel",
   connectedToServer: "Connected to {serverName}",
+  connectConfirmTitle: "Connect to server",
+  connectConfirmBody:
+    "Connect PKV Sync to {server}? The server address and deployment key from this link will be saved; you still sign in with your own account.",
   changeServer: "Change server",
   loggedIn: "Logged in",
   registeredAndLoggedIn: "Registered and logged in",
@@ -173,6 +189,9 @@ export const en = {
   defaultIosDevice: "iOS device",
   defaultDesktopDevice: "Desktop",
   enableHistoryUi: "Enable history and diff UI",
+  pruneEmptyFolders: "Prune folders emptied by remote deletions",
+  firstPruneNotice:
+    "PKV Sync removed empty folder {path} (disable in settings)",
   showFileHistoryCommand: "Show file history",
   showVaultHistoryCommand: "Show vault history",
   fileHistoryMenu: "PKV Sync: File history",

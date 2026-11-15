@@ -104,6 +104,8 @@ export const zhHant = {
   migrateProgressSummary:
     "{processed}/{total} 個檔案 - 批次 {batch}/{batches} - 二進位 {blobs}/{totalBlobs}",
   migrateCompleteSummary: "已遷移 {count} 個檔案 - 已略過 {skipped} 個",
+  migrateCompleteRefused:
+    "{count} 個檔案未能遷移，未寫入新筆記庫：{paths}",
   migrateFailed: "遷移失敗",
   migrateCompleteNotice: "已將 {count} 個檔案遷移到「{name}」",
   viewSyncStatusCommand: "檢視同步狀態詳情",
@@ -117,6 +119,9 @@ export const zhHant = {
     "無法同步 {path}：序列化請求為 {bytes} 位元組，超過伺服端 {limit} 位元組的內嵌上限。",
   pushProxyTooLarge:
     "無法同步 {path}：單一檔案請求（{bytes} 位元組）仍被伺服端或代理判定為過大。",
+  pushPathsRefusedSummary: "有 {count} 個檔案無法同步，只會保留在本機。",
+  pushPathRejected:
+    "無法同步 {path}：伺服端拒絕了該路徑（{reason}）。在你重新命名或修改它之前，它只會保留在本機。",
   pushRetryLater: "伺服端暫時拒絕本次推送，將於 {seconds} 秒後重試。",
   pushSplitBudgetExceeded:
     "已發生 {count} 次請求超限，推送已停止。請檢查伺服端或代理限制。",
@@ -124,7 +129,17 @@ export const zhHant = {
   conflictNotice: "PKV Sync 衝突：{path}",
   conflictCopyFailed: "無法為 {path} 寫入衝突副本：{reason}",
   sseAuthFailed: "即時同步已停止：伺服器拒絕了該權杖",
+  emptyScanHeld: "庫掃描未發現檔案，刪除已暫緩",
+  confirmEmptySyncCommand: "確認空庫刪除並同步",
+  emptyScanConfirmTitle: "確認同步整庫刪除",
+  emptyScanConfirmBody:
+    "最近一次掃描發現 0 個檔案，但同步索引中仍有 {count} 條記錄。這通常意味著儲存不可用（權限被收回、磁碟未掛載），而不是你刪除了所有內容。確認後這些刪除將同步到所有裝置。",
+  emptyScanConfirmAccept: "仍要同步刪除",
+  modalCancel: "取消",
   connectedToServer: "已連線到「{serverName}」",
+  connectConfirmTitle: "連線到伺服器",
+  connectConfirmBody:
+    "將 PKV Sync 連線到 {server}？將儲存連結中的伺服器位址與部署金鑰；之後仍需用你自己的帳號登入。",
   changeServer: "變更伺服器",
   loggedIn: "已登入",
   registeredAndLoggedIn: "已註冊並登入",
@@ -169,6 +184,8 @@ export const zhHant = {
   defaultIosDevice: "iOS 裝置",
   defaultDesktopDevice: "桌面裝置",
   enableHistoryUi: "開啟歷史與差異介面",
+  pruneEmptyFolders: "回收被遠端刪除清空的目錄",
+  firstPruneNotice: "PKV Sync 已回收空目錄 {path}（可在設定中關閉）",
   showFileHistoryCommand: "檢視檔案歷史",
   showVaultHistoryCommand: "檢視筆記庫歷史",
   fileHistoryMenu: "PKV Sync：檔案歷史",

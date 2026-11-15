@@ -5,6 +5,7 @@ import type { PushFailure } from "./push-errors";
 import {
   DEFAULT_PUSH_TARGET_BYTES,
   MAX_413_FAILURES,
+  QUARANTINE_RETRY_MS,
   SINGLETON_RETRY_MS,
   normalizePushLimits,
   type PushLimits
@@ -19,6 +20,12 @@ export interface PushCallbacks<T extends PushItem> {
   deviceName: string;
   send(items: readonly T[]): Promise<PushResponse>;
   onAccepted(items: readonly T[], response: PushResponse): Promise<void>;
+  /**
+   * R15-2: a deterministic single-file rejection took this path out of the
+   * batch. The file is still on disk and still pending locally — it will
+   * never reach the server — so the user has to be told which one and why.
+   */
+  onQuarantined?(path: string, code: string): void;
 }
 
 export interface PushRun {
@@ -34,33 +41,88 @@ interface RejectedItem {
   until: number;
 }
 
-function takePrefix<T extends PushItem>(
-  items: readonly T[],
-  offset: number,
-  deviceName: string,
-  target: number,
-  limits: PushLimits,
-  weight: (item: T) => number,
-  error: (failure: PushFailure) => Error
-): T[] {
+/**
+ * R15-2: server rejections that are a property of the PATH or its CONTENT,
+ * not of the request. Retrying the same bytes can never succeed, so a single
+ * such file must not be able to fail the run that carries it.
+ *
+ * The list is deliberately closed and narrow. Anything else — 401/403 (a
+ * revoked token), 429 (a retryable throttle), 409 (head mismatch, which the
+ * engine retries at a higher level), 5xx, an unknown `code` — still throws:
+ * those say something about the REQUEST or the SESSION, and swallowing them
+ * would record a batch as applied that the server never accepted.
+ */
+const DETERMINISTIC_4XX_CODES: ReadonlySet<string> = new Set([
+  // path::normalize refused the name (over-deep percent chain, reserved
+  // name, escaped separator, over-long component…).
+  "invalid_path",
+  // The text body parses as a blob pointer in its entirety (R14-M4).
+  "invalid_text",
+  // The vault's exclude globs or allowlist no longer admit this path.
+  "path_excluded",
+  // The admin's text/binary classifier disagrees with what we sent.
+  "wrong_file_kind"
+]);
+
+function deterministicCode(error: unknown): string | null {
+  if (!(error instanceof ApiError)) return null;
+  if (error.status !== 400) return null;
+  return DETERMINISTIC_4XX_CODES.has(error.code) ? error.code : null;
+}
+
+/**
+ * Pack one request's worth of items starting at `offset`.
+ *
+ * The rules are all here, once: the empty-body seed, the `+1` separator
+ * between items, the target-byte stop, `limits.max_changes`, and a single
+ * item that cannot fit at all (`hard_limit`). R15-2 inlined a copy of this
+ * inside `sendPacked` while leaving the original as dead code, so the two
+ * could drift; R16-10 asked for one or the other, and the skip-aware version
+ * is the one that has to exist.
+ *
+ * `skip` withholds items (quarantined paths) without consuming them: the
+ * caller advances to the returned `end`, which is the exclusive end of the
+ * window this call examined — items before it were either packed or
+ * deliberately skipped, so nothing is retried and nothing is jumped over.
+ */
+function packChunk<T extends PushItem>(options: {
+  items: readonly T[];
+  offset: number;
+  deviceName: string;
+  target: number;
+  limits: PushLimits;
+  weight: (item: T) => number;
+  error: (failure: PushFailure) => Error;
+  skip?: (item: T) => boolean;
+}): { chunk: T[]; end: number; bytes: number } {
+  const { items, offset, deviceName, target, limits, weight, error, skip } = options;
   const chunk: T[] = [];
   let bytes = pushBodyBytes([], deviceName);
-  for (let i = offset; i < items.length && chunk.length < limits.max_changes; i++) {
-    const next = bytes + weight(items[i]) + (chunk.length ? 1 : 0);
-    if (chunk.length && (next > target || next > limits.max_json_bytes)) break;
-    if (next > limits.max_json_bytes) {
+  let next = offset;
+  while (next < items.length && chunk.length < limits.max_changes) {
+    const item = items[next];
+    if (skip?.(item)) {
+      next += 1;
+      continue;
+    }
+    const candidate = bytes + weight(item) + (chunk.length ? 1 : 0);
+    if (chunk.length && (candidate > target || candidate > limits.max_json_bytes)) {
+      break;
+    }
+    if (candidate > limits.max_json_bytes) {
       throw error({
         kind: "hard_limit",
-        path: items[i].change.path,
-        bytes: next,
+        path: item.change.path,
+        bytes: candidate,
         limit: limits.max_json_bytes
       });
     }
-    chunk.push(items[i]);
-    bytes = next;
+    chunk.push(item);
+    bytes = candidate;
+    next += 1;
     if (bytes > target) break;
   }
-  return chunk;
+  return { chunk, end: next, bytes };
 }
 
 function splitAtByteMiddle<T extends PushItem>(
@@ -87,6 +149,13 @@ export class PushBatcher {
   private limitsKey = "";
   private deferredUntil = 0;
   private rejected = new Map<string, RejectedItem>();
+  /**
+   * R15-2: paths the server deterministically refuses. Kept separately from
+   * `rejected` (which models "too big for the proxy" and therefore carries a
+   * byte weight) because the reason and the retry horizon differ: a proxy
+   * limit can lift, a rejected path cannot change without the file changing.
+   */
+  private quarantined = new Map<string, { fingerprint: string; code: string; until: number }>();
   // R8-5: a manual retry can arrive while a run is already mid-send (its
   // beginRun consumed the entry probe). Consuming this flag per send
   // clears the learned cooldowns from that point on, so the user's
@@ -120,9 +189,19 @@ export class PushBatcher {
     if (retryOversized) {
       this.rejected.clear();
       this.deferredUntil = 0;
+      // A manual "try again" also re-tries quarantined files: the user may
+      // have fixed the configuration (changed the allowlist, renamed the
+      // file) since they were withheld.
+      this.quarantined.clear();
     }
     for (const [path, entry] of this.rejected) {
       if (entry.until <= this.now()) this.rejected.delete(path);
+    }
+    // A quarantine expires with the fingerprint, not with the clock alone:
+    // an unchanged file stays out (re-sending it is a guaranteed 400), an
+    // edited one is retried.
+    for (const [path, entry] of this.quarantined) {
+      if (entry.until <= this.now()) this.quarantined.delete(path);
     }
     assertActive();
     if (this.deferredUntil > this.now()) {
@@ -154,22 +233,28 @@ export class PushBatcher {
               this.midRunRetryRequested = false;
               this.rejected.clear();
               this.deferredUntil = 0;
+              this.quarantined.clear();
             }
-            const chunk = takePrefix(
-              remaining,
+            // R15-2: skip every path the server has already refused for
+            // these exact bytes. R16-10: the packing rules live in
+            // `packChunk`, once — this loop used to carry a second copy of
+            // them while the original sat unused.
+            const packed = packChunk({
+              items: remaining,
               offset,
-              callbacks.deviceName,
-              this.target,
+              deviceName: callbacks.deviceName,
+              target: this.target,
               limits,
               weight,
-              this.makeError
-            );
-            const bytes = pushBodyBytes(
-              chunk.map((item) => item.change),
-              callbacks.deviceName
-            );
-            if (chunk.length === 0 || bytes > limits.max_json_bytes) {
-              throw new Error("invalid_push_partition");
+              error: this.makeError,
+              skip: (item) => this.isQuarantined(item)
+            });
+            const { chunk, bytes } = packed;
+            const next = packed.end;
+            if (chunk.length === 0) {
+              // Nothing sendable left in this window (everything from
+              // `offset` on is quarantined).
+              break;
             }
             for (const item of chunk) {
               const previous = this.rejected.get(item.change.path);
@@ -193,6 +278,32 @@ export class PushBatcher {
               response = await callbacks.send(chunk);
             } catch (error) {
               assertActive();
+              const code = deterministicCode(error);
+              if (code !== null) {
+                if (chunk.length === 1) {
+                  // A single file the server refuses by name. Quarantine it
+                  // and carry on with the rest of `remaining` instead of
+                  // failing the run that carries it (R15-2).
+                  const item = chunk[0];
+                  this.quarantined.set(item.change.path, {
+                    fingerprint: item.fingerprint,
+                    code,
+                    until: this.now() + QUARANTINE_RETRY_MS
+                  });
+                  callbacks.onQuarantined?.(item.change.path, code);
+                  offset = next;
+                  continue;
+                }
+                // Bisect to find the offender; the healthy half is still
+                // sent (the recursion quarantines on the way down).
+                const [left, right] = splitAtByteMiddle(chunk, weight);
+                assertActive();
+                await sendPacked(left);
+                assertActive();
+                await sendPacked(right);
+                offset = next;
+                continue;
+              }
               if (!(error instanceof ApiError) || error.status !== 413) throw error;
               if (error.retryAfterAt !== undefined && error.retryAfterAt > this.now()) {
                 this.deferredUntil = error.retryAfterAt;
@@ -239,17 +350,29 @@ export class PushBatcher {
               await sendPacked(left);
               assertActive();
               await sendPacked(right);
-              offset += chunk.length;
+              offset = next;
               continue;
             }
             assertActive();
             await callbacks.onAccepted(chunk, response);
             assertActive();
-            offset += chunk.length;
+            offset = next;
           }
         };
         await sendPacked(items);
       }
     };
+  }
+
+  private isQuarantined(item: PushItem): boolean {
+    const entry = this.quarantined.get(item.change.path);
+    if (!entry) return false;
+    if (entry.until <= this.now()) {
+      this.quarantined.delete(item.change.path);
+      return false;
+    }
+    // The cooldown only covers the CONTENT the server refused. An edited
+    // file has a new fingerprint and is worth a retry immediately.
+    return entry.fingerprint === item.fingerprint;
   }
 }

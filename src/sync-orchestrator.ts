@@ -59,7 +59,13 @@ export class SyncOrchestrator {
       deviceName: this.plugin.settings.deviceName,
       textExtensions,
       extraExcludeGlobs: this.plugin.settings.extraExcludeGlobs,
-      vault: new ObsidianVaultAdapter(this.plugin.app),
+      vault: new ObsidianVaultAdapter(
+        this.plugin.app,
+        // Live reads: the toggle saves with rebuild:false, so the running
+        // engine must see the current value without waiting for a rebuild.
+        () => this.plugin.settings.pruneEmptyFolders,
+        () => this.plugin.text()
+      ),
       api: new SyncApi(this.plugin.api()),
       index: {
         loadIndex: () => this.plugin.loadSyncIndex(scopeKey),
