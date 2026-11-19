@@ -46,22 +46,47 @@ interface RejectedItem {
  * not of the request. Retrying the same bytes can never succeed, so a single
  * such file must not be able to fail the run that carries it.
  *
- * The list is deliberately closed and narrow. Anything else — 401/403 (a
- * revoked token), 429 (a retryable throttle), 409 (head mismatch, which the
- * engine retries at a higher level), 5xx, an unknown `code` — still throws:
- * those say something about the REQUEST or the SESSION, and swallowing them
- * would record a batch as applied that the server never accepted.
+ * R17-H2: the list is the server's per-file error contract, spelled out.
+ * Four codes describe the path or its classification:
+ * - `invalid_path`: path::normalize refused the name (over-deep percent
+ *   chain, reserved name, escaped separator, over-long component…).
+ * - `invalid_text`: the text body parses as a blob pointer in its
+ *   entirety (R14-M4).
+ * - `path_excluded`: the vault's exclude globs or allowlist no longer
+ *   admit this path.
+ * - `wrong_file_kind`: the admin's text/binary classifier disagrees with
+ *   what we sent.
+ * Five more are per-file verdicts produced while merging one change:
+ * - `file_too_large`: this file exceeds max_file_size.
+ * - `path_conflict`: the path collides with a case-folded sibling or an
+ *   existing directory (S5 guard).
+ * - `missing_blob`: the blob this change points at is not uploaded.
+ * - `blob_size_mismatch`: the uploaded blob's size disagrees with the
+ *   declared size.
+ * - `bad_commit`: the base/head tree cannot be read at this path.
+ * All nine are decided by the bytes we sent — no retry of the same
+ * request can change the answer.
+ *
+ * Anything else — 401/403 (a revoked token), 429 (a retryable throttle),
+ * 409 (head mismatch, which the engine retries at a higher level), 5xx,
+ * an unknown `code` — still throws: those say something about the REQUEST
+ * or the SESSION, and swallowing them would record a batch as applied
+ * that the server never accepted.
  */
 const DETERMINISTIC_4XX_CODES: ReadonlySet<string> = new Set([
-  // path::normalize refused the name (over-deep percent chain, reserved
-  // name, escaped separator, over-long component…).
   "invalid_path",
-  // The text body parses as a blob pointer in its entirety (R14-M4).
   "invalid_text",
-  // The vault's exclude globs or allowlist no longer admit this path.
   "path_excluded",
-  // The admin's text/binary classifier disagrees with what we sent.
-  "wrong_file_kind"
+  "wrong_file_kind",
+  // R17-H2: per-file merge verdicts. Isolating them is what keeps one
+  // oversized file, one case-folded collision, or one un-downloadable
+  // blob from wedging every other pending change in the vault behind a
+  // permanently red status.
+  "file_too_large",
+  "path_conflict",
+  "missing_blob",
+  "blob_size_mismatch",
+  "bad_commit"
 ]);
 
 function deterministicCode(error: unknown): string | null {
@@ -239,6 +264,7 @@ export class PushBatcher {
             // these exact bytes. R16-10: the packing rules live in
             // `packChunk`, once — this loop used to carry a second copy of
             // them while the original sat unused.
+            const withheld: Array<{ path: string; code: string }> = [];
             const packed = packChunk({
               items: remaining,
               offset,
@@ -247,10 +273,25 @@ export class PushBatcher {
               limits,
               weight,
               error: this.makeError,
-              skip: (item) => this.isQuarantined(item)
+              skip: (item) => {
+                const code = this.quarantineCode(item);
+                if (code === null) return false;
+                withheld.push({ path: item.change.path, code });
+                return true;
+              }
             });
             const { chunk, bytes } = packed;
             const next = packed.end;
+            // R17-H3: a withheld path produces no send and no rejection in
+            // THIS pass, so from the second pass on the caller's per-pass
+            // refusal map came back empty and the vault painted itself
+            // green while the file stayed missing from the server. The
+            // refusal is a state, not an event: report every withheld path
+            // on every pass that ends without syncing it. Duplicate
+            // notices are the caller's concern (one per path per pass).
+            for (const item of withheld) {
+              callbacks.onQuarantined?.(item.path, item.code);
+            }
             if (chunk.length === 0) {
               // Nothing sendable left in this window (everything from
               // `offset` on is quarantined).
@@ -364,15 +405,21 @@ export class PushBatcher {
     };
   }
 
-  private isQuarantined(item: PushItem): boolean {
+  /**
+   * The active quarantine code for this item's exact content, or null when
+   * the path is not withheld. The skip path uses the code to report WHICH
+   * code withheld the file (R17-H3).
+   */
+  private quarantineCode(item: PushItem): string | null {
     const entry = this.quarantined.get(item.change.path);
-    if (!entry) return false;
+    if (!entry) return null;
     if (entry.until <= this.now()) {
       this.quarantined.delete(item.change.path);
-      return false;
+      return null;
     }
     // The cooldown only covers the CONTENT the server refused. An edited
     // file has a new fingerprint and is worth a retry immediately.
-    return entry.fingerprint === item.fingerprint;
+    if (entry.fingerprint !== item.fingerprint) return null;
+    return entry.code;
   }
 }

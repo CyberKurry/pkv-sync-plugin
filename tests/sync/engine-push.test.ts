@@ -1770,4 +1770,141 @@ describe("a quarantined file is reported, not silently dropped (R16-H1)", () => 
       notices.slice(noticesBefore).filter((text) => text.includes("poison.md"))
     ).toHaveLength(1);
   });
+
+  it("keeps the refusal visible on the next pass (R17-H3)", async () => {
+    // R16-H1 made the pass that SAW a refusal claim an error. But the
+    // quarantine lives in the batcher across passes: from the second pass
+    // on, the withheld file is skipped by the packer — zero sends, zero
+    // callbacks — so the pass-local `refused` map came back empty, the
+    // status bar returned to green and lastSyncSuccessAt advanced while
+    // the vault is permanently missing the file. The refusal is a state,
+    // not an event: every pass that ends with the file still unsynced
+    // must report it.
+    const poison = {
+      path: "poison.md",
+      hash: "hp",
+      size: 1,
+      kind: "text" as const,
+      content: "x"
+    };
+    const healthy = {
+      path: "good.md",
+      hash: "hg",
+      size: 1,
+      kind: "text" as const,
+      content: "y"
+    };
+    const vault = new FakeVault([poison, healthy]);
+    const api = {
+      state: vi.fn().mockResolvedValue({ current_head: null, changed_since: false }),
+      pull: vi.fn().mockResolvedValue({
+        from: null,
+        to: null,
+        added: [],
+        modified: [],
+        deleted: []
+      }),
+      uploadCheck: vi.fn().mockResolvedValue({ missing: [] }),
+      uploadBlob: vi.fn(),
+      push: vi.fn(async (_v: string, _m: string | null, changes: Array<{ path: string }>) => {
+        if (changes.some((change) => change.path === "poison.md")) {
+          throw new ApiError(400, "wrong_file_kind", "wrong_file_kind", undefined);
+        }
+        return { new_commit: "c1", files_changed: changes.length };
+      }),
+      downloadBlob: vi.fn()
+    };
+    const idx = new FakeIndex({ lastSyncedCommit: null, files: {} });
+    const setStatus = vi.fn();
+    const onSyncSuccess = vi.fn();
+    const engine = new SyncEngine({
+      vaultId: "v",
+      deviceName: "d",
+      textExtensions: new Set(["md"]),
+      vault: vault as never,
+      api: api as never,
+      index: idx,
+      setStatus,
+      onSyncSuccess
+    });
+
+    await engine.syncNow();
+    const firstPassStatus = setStatus.mock.calls.at(-1)?.[0];
+    expect(firstPassStatus).toBe("error");
+    expect(setStatus.mock.calls.some((call) => call[0] === "connected")).toBe(
+      false
+    );
+    const pushesAfterFirstPass = api.push.mock.calls.length;
+    expect(pushesAfterFirstPass).toBeGreaterThan(0);
+
+    setStatus.mockClear();
+    onSyncSuccess.mockClear();
+    await engine.syncNow();
+
+    expect(setStatus.mock.calls.some((call) => call[0] === "connected")).toBe(
+      false
+    );
+    expect(onSyncSuccess).not.toHaveBeenCalled();
+    expect(setStatus.mock.calls.at(-1)?.[0]).toBe("error");
+    // The withheld file produced no push attempt on this pass — reporting
+    // must come from the skip path, not from a rejection.
+    expect(api.push.mock.calls.length).toBe(pushesAfterFirstPass);
+  });
+});
+
+describe("a pull_too_large rejection is named, not left raw (R17-M7)", () => {
+  beforeEach(() => {
+    vi.stubGlobal("window", globalThis);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("maps the pull budget 413 to the localized split-vault guidance", async () => {
+    // A vault beyond the per-response tree limit 413s every pull with the
+    // same code; there is no pagination yet, so every pass fails the same
+    // way. The raw server message ("vault has too many files for one pull
+    // response; limit is 50000") tells the user nothing actionable — the
+    // status bar names the remedial action instead.
+    const idx = new FakeIndex({ lastSyncedCommit: "c0", files: {} });
+    const vault = new FakeVault([]);
+    const api = {
+      state: vi.fn().mockResolvedValue({ current_head: "c1", changed_since: true }),
+      pull: vi
+        .fn()
+        .mockRejectedValue(
+          new ApiError(
+            413,
+            "pull_too_large",
+            "vault has too many files for one pull response; limit is 50000",
+            undefined
+          )
+        ),
+      uploadCheck: vi.fn().mockResolvedValue({ missing: [] }),
+      uploadBlob: vi.fn(),
+      push: vi.fn(),
+      downloadBlob: vi.fn(),
+      downloadTextFile: vi.fn()
+    };
+    const setStatus = vi.fn();
+    const engine = new SyncEngine({
+      vaultId: "v",
+      deviceName: "d",
+      textExtensions: new Set(["md"]),
+      vault: vault as never,
+      api: api as never,
+      index: idx,
+      setStatus
+    });
+
+    await expect(engine.syncNow()).rejects.toThrow();
+
+    const errorCalls = setStatus.mock.calls.filter(
+      (call) => call[0] === "error"
+    );
+    expect(errorCalls.length).toBeGreaterThan(0);
+    expect(errorCalls.at(-1)?.[1]).toContain("split");
+    expect(errorCalls.at(-1)?.[1]).not.toContain("limit is 50000");
+  });
 });
